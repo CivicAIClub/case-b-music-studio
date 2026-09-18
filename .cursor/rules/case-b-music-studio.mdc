@@ -1,0 +1,31 @@
+---
+description: Project context for Case B Music Studio — client, architecture, Apps Script backend, auth model, deploy, and constraints
+alwaysApply: true
+---
+
+# Case B — Music Studio Infrastructure
+
+## Client and problem
+- **Client:** Mr. O'Neal (music teacher, Pomfret School). Dr. Burns is a co-teacher on calendar invites.
+- **Problem:** lesson materials are scattered, scheduling is manual back-and-forth, and there is no central record of each student's progress.
+- **Goal:** a Music Student Profile portal (roster, inline profiles, schedules from Sheets) that grew into scheduling, Drive resources, and lesson recaps. Future ideas: automated reminders, AI tagging of sheet music, voice-transcribed lesson summaries.
+
+## Team
+- Developers: Serena Xu, JT Gannon. Club lead: Cayden Auyang. Serena's original April 2026 UI commits are on `archive/serena-continued-work`.
+
+## Stack and architecture
+- **Frontend:** Vite 6 + React 18 + TypeScript (strict, `noUnusedLocals`) + react-router 6 with **HashRouter** (GitHub Pages only serves `/404.html` at the publishing root, so deep links must live after `#`). Entry `src/main.tsx`, routes in `src/App.tsx`, pages in `src/pages/`, components in `src/components/`, API clients in `src/api/`, helpers in `src/lib/`, shared types in `src/types.ts`, styles in `src/index.css` (Pomfret palette, Crimson Pro + Inter).
+- **Backend:** one Google Apps Script web app, `apps-script/Code.gs`, bound to the studio Google Sheet (tabs: `Form Responses 1`, `Lesson Schedule`, `Lesson Recaps`, one tab per student). `GET` routes by query params (`?action=list`, `?action=schedule-list`, `?email=`); `POST` routes by `action` in a `text/plain` JSON body (CORS). The endpoint list and body shapes are in the header comment of `Code.gs`; keep it in sync when adding actions.
+- **Auth model:** every POST includes `secret`, checked against the `SHARED_SECRET` Script Property. The secret is inlined into the built JS by Vite, so the deployed URL is treated as semi-private. Google Sign-In + email allowlist was planned but is **not implemented**; do not describe it as existing.
+- **Config:** `.env.local` → `VITE_APPS_SCRIPT_BASE_URL`, `VITE_APPS_SCRIPT_SHARED_SECRET` (typed in `src/vite-env.d.ts`). Apps Script Script Properties: `SHARED_SECRET`, `MUSIC_STUDIO_SPREADSHEET_ID`, `CLASS_RESOURCES_FOLDER_ID`, `STUDENT_RESOURCES_PARENT_FOLDER_ID`, cached `STUDENT_FOLDER:<email>` ids.
+- **Deploy:** `.github/workflows/deploy-pages.yml` builds with the two values from repo Actions secrets and publishes `dist/` to `gh-pages`. Live at https://civicaiclub.github.io/case-b-music-studio/. `vite.config.ts` `base` must equal `/<repo-name>/`.
+
+## Phases shipped (see README for setup of each)
+1. Roster + inline profiles from Sheets. 2. Calendar event creation (`preview-event`, `create-event`, `cancel-event`; writes `Calendar Event ID`, flips Status to `Scheduled`). 3. Class Resources shared Drive folder (viewer access sync). 4. Per-student Drive folders with editor access. 5. Teacher lesson recaps (`Lesson Recaps` tab, composite key student email + lesson date + start time, drafts in localStorage).
+
+## Constraints
+- The script never lowers a Drive permission and never deletes a folder; keep that invariant.
+- Any change to `Code.gs` needs a **new deployment version** in the Apps Script editor; remind the developer.
+- New env vars go in `.env.example` (placeholder + comment), `src/vite-env.d.ts`, the README table, and both workflows.
+- `npm run build` runs `tsc --noEmit` first; unused variables fail the build.
+- Do not commit `dist/`, `node_modules/`, or `.env.local`.

@@ -1,0 +1,57 @@
+name: Deploy to GitHub Pages
+
+# Builds the Vite app and publishes dist/ to this repo's gh-pages branch.
+# Live at https://civicaiclub.github.io/case-b-music-studio/
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gh-pages-publish
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        env:
+          # Vite inlines VITE_* values into the bundle at build time. Both
+          # come from this repo's Actions secrets (Settings → Secrets and
+          # variables → Actions). The shared secret IS visible in the
+          # bundle — that's the documented model; the deployed URL is
+          # treated as semi-private.
+          VITE_APPS_SCRIPT_BASE_URL: ${{ secrets.VITE_APPS_SCRIPT_BASE_URL }}
+          VITE_APPS_SCRIPT_SHARED_SECRET: ${{ secrets.VITE_APPS_SCRIPT_SHARED_SECRET }}
+        run: npm run build
+
+      # GitHub Pages serves /404.html for unknown paths; mirroring index.html
+      # keeps direct entry into the app working (routes live after `#`).
+      - name: Add SPA fallback
+        run: cp dist/index.html dist/404.html
+
+      - name: Ensure .nojekyll
+        run: touch dist/.nojekyll
+
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./dist
+          enable_jekyll: false
+          commit_message: "deploy: ${{ github.sha }}"

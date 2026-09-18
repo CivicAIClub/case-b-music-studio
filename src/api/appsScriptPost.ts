@@ -45,7 +45,7 @@ function readSharedSecret(): string {
   const value = import.meta.env.VITE_APPS_SCRIPT_SHARED_SECRET;
   if (typeof value !== "string" || !value.trim()) {
     throw new Error(
-      "Missing VITE_APPS_SCRIPT_SHARED_SECRET. Add it to projects/case-b-music-studio/.env.local (see .env.example) and restart the dev server."
+      "Missing VITE_APPS_SCRIPT_SHARED_SECRET. Add it to .env.local at the repo root (copy .env.example) and restart the dev server."
     );
   }
   return value;
