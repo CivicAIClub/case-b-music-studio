@@ -20,14 +20,21 @@ Build a **Music Student Profile** experience (roster, inline profiles, schedules
 |------|------|
 | Developer | Serena Xu |
 | Developer | JT Gannon |
+| Club lead | Cayden Auyang |
 
-## Setup
+**Live site:** https://civicaiclub.github.io/case-b-music-studio/ (treat the URL as semi-private; see Auth below).
 
-From this folder (`projects/case-b-music-studio/`):
+**History:** the early UI work (April 2026: UI shell, live Sheets data, Pomfret styling, form-submission history) was written by Serena on the monorepo branch `case-b/continued-work`; those original commits are preserved under her name on the `archive/serena-continued-work` branch of this repo. Later phases were merged through PRs #8–#24 in the old monorepo.
+
+## Setup from a fresh clone
+
+Prerequisites: Node.js 20 or newer and npm.
 
 ```bash
-npm install
-cp .env.example .env.local   # then paste the shared secret (see below)
+git clone https://github.com/CivicAIClub/case-b-music-studio.git
+cd case-b-music-studio
+npm ci                        # installs exactly what package-lock.json pins
+cp .env.example .env.local    # then fill in the two values (see below)
 npm run dev
 ```
 
@@ -40,28 +47,18 @@ npm run preview   # optional local preview of the build
 
 **Data:** The app loads **students and schedules from your Google Apps Script** (see API client comments). Mock data is not used for the live roster.
 
-### Auth (Google Sign-In + email allowlist)
+### Auth (shared secret)
 
-Every POST is gated by Google Sign-In. The flow:
+Every POST to the Apps Script web app must carry a `secret` field that matches the `SHARED_SECRET` Script Property. Reads (`GET`) are open. Environment variables the frontend needs (both in `.env.local`, documented in `.env.example`):
 
-1. The frontend renders a "Sign in with Google" screen on first visit.
-2. Google returns an **ID token** (a signed JWT) for the signed-in user.
-3. The frontend sends that token in every POST body.
-4. Apps Script verifies the token with Google's `tokeninfo` endpoint and checks the verified email against `ALLOWED_USER_EMAILS` in `Code.gs`. Only listed accounts are allowed.
+| Variable | What it is |
+|---|---|
+| `VITE_APPS_SCRIPT_BASE_URL` | The web app `/exec` URL (see below) |
+| `VITE_APPS_SCRIPT_SHARED_SECRET` | Same value as the `SHARED_SECRET` Script Property. Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 
-#### One-time OAuth client ID setup
+Vite inlines both values into the built JS, so anyone who opens the deployed site in DevTools can read the secret. That is the documented model for this single-teacher tool: treat the deployed URL as private and don't link it publicly. If the site ever needs to be public, move the secret behind a server-side proxy.
 
-1. Go to https://console.cloud.google.com → APIs & Services → Credentials.
-2. **Create Credentials → OAuth client ID → Web application.**
-3. Authorized JavaScript origins:
-   - `http://localhost:5173` (dev server)
-   - `https://civicaiclub.github.io` (deployed site, adjust if hosting elsewhere)
-4. No redirect URI needed — we use the implicit ID-token flow.
-5. Copy the resulting client ID into:
-   - **Frontend:** `.env.local` → `VITE_GOOGLE_OAUTH_CLIENT_ID=<your-id>.apps.googleusercontent.com`
-   - **Apps Script:** Project Settings → Script Properties → `OAUTH_CLIENT_ID = <same value>`
-
-The OAuth client ID is bundled into the JS — that's expected and safe; OAuth client IDs are public by design. Security comes from the email allowlist on the Apps Script side rejecting tokens issued for any account that isn't in `ALLOWED_USER_EMAILS`.
+> A Google Sign-In + email-allowlist design (ID token verified by Apps Script against an `ALLOWED_USER_EMAILS` list) was planned and documented earlier but is **not implemented** in the current code. Nothing reads `VITE_GOOGLE_OAUTH_CLIENT_ID` or `OAUTH_CLIENT_ID` today. Keep this in mind if you pick that work up.
 
 #### One-time `/exec` URL setup
 
@@ -73,9 +70,9 @@ The OAuth client ID is bundled into the JS — that's expected and safe; OAuth c
 
 After any change to `apps-script/Code.gs`, **redeploy a new version** (Manage deployments → ✏️ → New version) so the live URL serves the new code. The `/exec` URL itself stays the same.
 
-#### Adding a new admin to the allowlist
+#### Who gets calendar invites
 
-Edit `ALLOWED_USER_EMAILS` in `apps-script/Code.gs`, save, redeploy a new version. No frontend change needed.
+`ALWAYS_INVITE_EMAILS` in `apps-script/Code.gs` lists the people invited to every lesson event in addition to the student (Mr. O'Neal, Dr. Burns, Cayden). Edit it, save, redeploy a new version. No frontend change needed.
 
 #### Sheet formatting (one-time)
 
@@ -193,5 +190,22 @@ Composite key `(Student Email, Lesson Date, Start Time)` — same as Phase 2's c
 - **Dashboard** — roster count, student name search (links to Students with profile open), recent updates and upcoming lessons when APIs succeed.
 - **Students** — directory with filters; clicking a student opens an **inline profile panel** (no separate profile URL).
 
+## Deploying to GitHub Pages
+
+`.github/workflows/deploy-pages.yml` runs on every push to `main`: `npm ci`, `npm run build` with `VITE_APPS_SCRIPT_BASE_URL` and `VITE_APPS_SCRIPT_SHARED_SECRET` injected from this repo's **Actions secrets**, then publishes `dist/` to the `gh-pages` branch. Site: https://civicaiclub.github.io/case-b-music-studio/. `vite.config.ts` sets `base` to `/case-b-music-studio/`; if the repo is ever renamed, update that too. `.github/workflows/ci.yml` type-checks and builds every pull request with placeholder values.
+
+## Working on this repo
+
+- Branch from `main` as `feature/<short-description>`, `fix/<short-description>`, or `chore/<short-description>` (lowercase, hyphens).
+- Every change goes through a pull request with at least one approval. `main` cannot be pushed to directly.
+- Never commit secrets. `.env.local` is gitignored; `.env.example` holds only placeholders.
+- After changing `apps-script/Code.gs`, redeploy a **new version** in the Apps Script editor or the live site keeps running the old code.
+- Cursor rules for this project are committed in `.cursor/rules/`. You do not need to paste anything into your IDE settings.
+- The full Git walkthrough for beginners is the club's **[Developer Onboarding Guide](https://github.com/CivicAIClub/docs/blob/main/developer-onboarding.md)**.
+
 ## Status
-🟢 Frontend MVP — dashboard, inline student profiles, Pomfret-styled shell
+🟢 Phases 1–5 shipped: dashboard, inline student profiles, calendar event creation, class and per-student Drive resources, teacher lesson recaps. Pomfret-styled shell, deployed to GitHub Pages.
+
+## History
+
+This repository was split out of the club monorepo (`CivicAIClub/Civic-AI-Github-Repository`, `projects/case-b-music-studio/`) on 2026-09-18 with full history preserved.

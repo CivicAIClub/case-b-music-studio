@@ -5,7 +5,8 @@
  *   GET ?action=schedule-list          → JSON array of row objects
  *   GET ?action=schedule&email=…       → JSON array for that student only
  *
- * Merge instructions: see apps-script/lesson-schedule-doGet-snippet.js
+ * The matching doGet handler lives in apps-script/Code.gs (HTTP endpoints
+ * section at the top of that file).
  */
 import { APPS_SCRIPT_BASE_URL } from "./appsScriptStudent";
 import { mapScheduleRowToLesson } from "./mapLessonScheduleRow";
