@@ -1,3 +1,16 @@
+// StudentDirectory.tsx: the "Students" page, the teacher's roster of music students. On the
+// left are a search box, Instrument and Level filters, and one card per student. Clicking a
+// card opens that student's full profile on the right, on the same page: their Google Form
+// answers, past form submissions, booked lessons, lesson recaps, their personal Google Drive
+// folder, and private teacher notes.
+// The site is built with React (a toolkit for building web pages out of reusable pieces
+// called "components"). This file holds two: StudentDetailPanel (the profile on the right)
+// and StudentDirectory (the whole page).
+// Data comes from the studio's Google Sheet through the Google Apps Script web app
+// (apps-script/Code.gs): the roster and one student's answers via src/api/appsScriptStudent.ts,
+// lessons via appsScriptSchedule.ts, recaps via appsScriptRecaps.ts, and lesson cancelling via
+// appsScriptCalendar.ts. Teacher notes are NOT sent to Google; they stay in this web browser.
+// The "import" lines below borrow those pieces, plus React's built-in helpers, from other files.
 import {
   useCallback,
   useEffect,
@@ -31,20 +44,26 @@ import {
 import { listRecapsForStudent } from "../api/appsScriptRecaps";
 import type { LessonRecap, ScheduledLesson, Student } from "../types";
 
+// How many past lessons to show under "Recent" before the teacher asks to see all of them.
 const RECENT_LESSONS_INITIAL_VISIBLE = 5;
 
+// The possible situations for each thing this page loads from Google: not started yet
+// ("idle"), in progress ("loading"), finished ("success", with the data), or failed ("error",
+// with a message). This one is for one student's latest form answers.
 type SheetFetchState =
   | { status: "idle" }
   | { status: "loading" }
   | { status: "success"; profile: SheetStudentProfile }
   | { status: "error"; message: string };
 
+// The same idea for loading the whole roster (the list itself is remembered separately).
 type RosterFetchState =
   | { status: "idle" }
   | { status: "loading" }
   | { status: "success" }
   | { status: "error"; message: string };
 
+// The same idea for loading one student's lessons from the "Lesson Schedule" tab.
 type ScheduleFetchState =
   | { status: "idle" }
   | { status: "loading" }
@@ -61,12 +80,19 @@ const TEACHER_NOTES_STORAGE_PREFIX = "caseB.teacherNotes.v1:";
 const LEGACY_LOCAL_NOTES_PREFIX = "student-notes-";
 const LEGACY_SESSION_NOTES_PREFIX = "musicStudio.caseB.teacherNotes.v1:";
 
+// After the teacher stops typing in the notes box, wait this long (400 milliseconds, under
+// half a second) before saving, so we don't save after every single keystroke.
 const NOTES_AUTOSAVE_MS = 400;
 
+// Build the name under which one student's notes are saved in the browser. Given the
+// student's ID (their email address), it gives back "caseB.teacherNotes.v1:" + that ID.
 function studentNotesStorageKey(studentId: string): string {
   return `${TEACHER_NOTES_STORAGE_PREFIX}${studentId}`;
 }
 
+// Save one student's teacher notes in this browser's "localStorage" (a small storage area
+// the browser keeps on this computer only; it is not shared with other computers or Google).
+// If saving isn't possible (storage full, or a private browsing window), quietly give up.
 function writeStudentNotesLocal(studentId: string, value: string): void {
   try {
     localStorage.setItem(studentNotesStorageKey(studentId), value);
@@ -75,11 +101,16 @@ function writeStudentNotesLocal(studentId: string, value: string): void {
   }
 }
 
+// Tidy a profile answer for display. Given some text (or nothing), it gives back the text
+// without extra spaces at the ends, or "-" if it is empty.
 function displayField(s: string | undefined): string {
   const t = (s ?? "").trim();
   return t.length ? t : "-";
 }
 
+// Load a student's saved teacher notes from this browser. It checks the current storage name
+// first, then two older names used by earlier versions of the site, so old notes aren't lost.
+// If nothing is saved anywhere, it gives back the fallback text (with "-" treated as empty).
 function readStoredTeacherNotes(studentId: string, fallback: string): string {
   try {
     const fromLocal = localStorage.getItem(
@@ -101,6 +132,9 @@ function readStoredTeacherNotes(studentId: string, fallback: string): string {
 }
 
 
+// The profile panel on the right side of the page, for one selected student. It is given the
+// student's details, all their past form submissions, how loading their lessons is going, and
+// two actions from the page around it: "try loading the lessons again" and "close the panel".
 function StudentDetailPanel({
   student,
   formSubmissions,
@@ -114,6 +148,9 @@ function StudentDetailPanel({
   onScheduleRetry: () => void;
   onClose: () => void;
 }) {
+  // "State" = information the page remembers and redraws itself when it changes.
+  // Here: the text in the teacher notes box (starting from whatever this browser saved), and
+  // whether the notes are waiting to be saved ("pending"), "saved", or untouched ("idle").
   const [teacherNotesDraft, setTeacherNotesDraft] = useState(() =>
     readStoredTeacherNotes(student.id, student.teacherNotes)
   );
@@ -129,6 +166,9 @@ function StudentDetailPanel({
   const [recapModalTarget, setRecapModalTarget] =
     useState<RecapEditorTarget | null>(null);
 
+  // Called when the teacher clicks Cancel on one of this student's lessons. It asks the Apps
+  // Script (through appsScriptCalendar.ts) to delete the Google Calendar event and mark the
+  // lesson "Cancelled" on the sheet. "useCallback" keeps this same function between redraws.
   const handleCancelLesson = useCallback(
     async (lesson: ScheduledLesson) => {
       try {
@@ -142,6 +182,7 @@ function StudentDetailPanel({
         // appears in Recent.
         onScheduleRetry();
       } catch (err) {
+        // If cancelling failed, tell the teacher why in a pop-up message.
         const message =
           err instanceof Error ? err.message : "Could not cancel the lesson.";
         window.alert("Cancel failed: " + message);
@@ -150,13 +191,19 @@ function StudentDetailPanel({
     [onScheduleRetry]
   );
 
+  // A "ref" is a note the page keeps that does NOT cause a redraw when it changes. The latest
+  // notes text is kept here too, so the delayed save and the save-on-leaving below always
+  // write the newest text rather than an out-of-date copy.
   const teacherNotesDraftRef = useRef(teacherNotesDraft);
   teacherNotesDraftRef.current = teacherNotesDraft;
 
+  // Remembers the waiting "save in a moment" timer, so it can be stopped or replaced.
   const notesSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null
   );
 
+  // "Effect" = something the page does automatically when it first opens or when something
+  // changes. When a different student is shown, load that student's saved notes into the box.
   useEffect(() => {
     const next = readStoredTeacherNotes(student.id, student.teacherNotes);
     setTeacherNotesDraft(next);
@@ -169,10 +216,13 @@ function StudentDetailPanel({
   // affordances and the user can still compose; the next save will
   // surface any backend error inline in the modal.
   useEffect(() => {
+    // Recaps are filed under the student's email address. An "abort controller" is a cancel
+    // switch, used if the teacher switches students before Google answers.
     const email = student.sheetEmail ?? student.id;
     const ac = new AbortController();
     setRecapsLoaded(false);
     setRecaps([]);
+    // Ask the Apps Script for this student's recaps from the "Lesson Recaps" tab.
     listRecapsForStudent(email, { signal: ac.signal })
       .then((list) => {
         setRecaps(list);
@@ -187,9 +237,13 @@ function StudentDetailPanel({
         setRecaps([]);
         setRecapsLoaded(true);
       });
+    // Clean-up: cancel the request if the teacher switches students before it finishes.
     return () => ac.abort();
   }, [student.id, student.sheetEmail]);
 
+  // Open the recap pop-up to write a new recap for a past lesson. The lesson is identified by
+  // student email + lesson date + start time (the same "key" the sheet uses); the name, lesson
+  // focus, and end time are passed along for the pop-up to show.
   const openWriteRecap = useCallback((lesson: ScheduledLesson) => {
     setRecapModalTarget({
       key: {
@@ -203,6 +257,7 @@ function StudentDetailPanel({
     });
   }, []);
 
+  // Open the same pop-up to edit an existing recap (the pop-up loads the saved recap itself).
   const openEditRecap = useCallback(
     (lesson: ScheduledLesson, _recap: LessonRecap) => {
       // Edit mode reuses the same modal — it'll fetch the existing
@@ -223,6 +278,8 @@ function StudentDetailPanel({
     []
   );
 
+  // After a recap is saved, update this panel's list without asking Google again: replace the
+  // old copy of that recap if there was one, or add the new one to the front of the list.
   const handleRecapSaved = useCallback((saved: LessonRecap) => {
     setRecaps((prev) => {
       const idx = prev.findIndex(
@@ -238,6 +295,7 @@ function StudentDetailPanel({
     });
   }, []);
 
+  // Stop the waiting "save in a moment" timer, if there is one.
   const clearNotesSaveTimeout = useCallback(() => {
     if (notesSaveTimeoutRef.current !== null) {
       clearTimeout(notesSaveTimeoutRef.current);
@@ -245,12 +303,16 @@ function StudentDetailPanel({
     }
   }, []);
 
+  // Save the notes right away (used when the teacher clicks out of the notes box).
   const flushNotesToLocalStorage = useCallback(() => {
     clearNotesSaveTimeout();
     writeStudentNotesLocal(student.id, teacherNotesDraftRef.current);
     setNotesSaveStatus("saved");
   }, [clearNotesSaveTimeout, student.id]);
 
+  // When this panel closes or switches to another student, save the notes one last time so
+  // nothing typed in the final moment is lost. (The part after "return () =>" runs on the
+  // way out.)
   useEffect(() => {
     return () => {
       clearNotesSaveTimeout();
@@ -258,6 +320,8 @@ function StudentDetailPanel({
     };
   }, [clearNotesSaveTimeout, student.id]);
 
+  // Runs on every keystroke in the notes box: update the text, show "Saving…", and restart a
+  // short timer. Only once the teacher pauses typing does the timer go off and save the notes.
   const handleTeacherNotesChange = useCallback(
     (value: string) => {
       setTeacherNotesDraft(value);
@@ -273,14 +337,21 @@ function StudentDetailPanel({
     [clearNotesSaveTimeout, student.id]
   );
 
+  // Once this student's lessons have loaded, split them into the next lesson, the rest of the
+  // upcoming lessons, and past ("recent") lessons (see src/lib/lessonScheduleUtils.ts).
+  // There is nothing to split while the lessons are still loading or failed to load.
   const schedulePartition = useMemo(() => {
     if (scheduleFetchState.status !== "success") return null;
     const email = student.sheetEmail ?? student.id;
     return partitionStudentLessons(scheduleFetchState.lessons, email);
   }, [scheduleFetchState, student.id, student.sheetEmail]);
 
+  // Everything below describes what the profile panel shows. It is written in "JSX", which
+  // looks like HTML (the language of web pages) mixed with bits of code in {curly braces}.
+  // Blank answers show as "-".
   return (
     <div className="card student-detail-panel">
+      {/* Top: the student's initials in a circle, name, instrument and level, and Close. */}
       <div className="student-detail-panel__header">
         <div className="student-detail-panel__identity">
           <span
@@ -307,6 +378,7 @@ function StudentDetailPanel({
         </button>
       </div>
 
+      {/* The student's main form answers. */}
       <section className="profile-section" aria-labelledby="profile-core-h">
         <h3 id="profile-core-h" className="profile-section__heading">
           Profile
@@ -335,6 +407,7 @@ function StudentDetailPanel({
         </dl>
       </section>
 
+      {/* Their goals, how long they have played, and their music theory background. */}
       <section className="profile-section" aria-labelledby="profile-goals-h">
         <h3 id="profile-goals-h" className="profile-section__heading">
           Goals / learning
@@ -355,6 +428,7 @@ function StudentDetailPanel({
         </dl>
       </section>
 
+      {/* The styles of music and specific songs they want to learn. */}
       <section className="profile-section" aria-labelledby="profile-rep-h">
         <h3 id="profile-rep-h" className="profile-section__heading">
           Interests / repertoire
@@ -371,6 +445,7 @@ function StudentDetailPanel({
         </dl>
       </section>
 
+      {/* Their email, and any updates or questions they wrote on the form. */}
       <section className="profile-section" aria-labelledby="profile-contact-h">
         <h3 id="profile-contact-h" className="profile-section__heading">
           Contact / student notes
@@ -387,8 +462,11 @@ function StudentDetailPanel({
         </dl>
       </section>
 
+      {/* A history of every time this student filled in the Google Form. */}
       <FormSubmissionHistorySection submissions={formSubmissions} />
 
+      {/* Scheduling: the times the student said they are free (from the form), and their */}
+      {/* actual booked lessons (from the "Lesson Schedule" tab). */}
       <section className="profile-section" aria-labelledby="profile-scheduling-h">
         <h3 id="profile-scheduling-h" className="profile-section__heading">
           Scheduling
@@ -397,6 +475,7 @@ function StudentDetailPanel({
           <div>
             <dt>Preferred lesson availability</dt>
             <dd>
+              {/* No times given shows "-"; otherwise one small badge per time slot. */}
               {student.availabilityBlocks.length === 0 ? (
                 "-"
               ) : (
@@ -421,10 +500,12 @@ function StudentDetailPanel({
             From the <strong>Lesson Schedule</strong> sheet (actual lessons,
             not form preferences).
           </p>
+          {/* Lessons still loading. */}
           {(scheduleFetchState.status === "loading" ||
             scheduleFetchState.status === "idle") && (
             <p className="muted">Loading schedule…</p>
           )}
+          {/* Loading failed: show why, with a button to try again. */}
           {scheduleFetchState.status === "error" && (
             <>
               <p className="empty-state" role="alert">
@@ -439,6 +520,8 @@ function StudentDetailPanel({
               </button>
             </>
           )}
+          {/* Loaded: show the next lesson, the other upcoming lessons (each can be */}
+          {/* cancelled), and past lessons. */}
           {scheduleFetchState.status === "success" && schedulePartition && (
             <>
               <p className="profile-booked__sub eyebrow">Next lesson</p>
@@ -481,6 +564,8 @@ function StudentDetailPanel({
                   <span className="muted"> · loading recaps…</span>
                 )}
               </p>
+              {/* Past lessons, each with a button to write or read its recap. Only the first */}
+              {/* 5 are shown until the teacher asks to see them all (RecapsTimeline.tsx). */}
               <RecapsTimeline
                 lessons={schedulePartition.recentLessons}
                 recaps={recaps}
@@ -493,11 +578,13 @@ function StudentDetailPanel({
         </div>
       </section>
 
+      {/* This student's personal Google Drive folder of materials. */}
       <StudentResourcesSection
         studentEmail={student.sheetEmail ?? student.id}
         studentName={student.name}
       />
 
+      {/* Private teacher notes, saved automatically in this browser only (not in the Sheet). */}
       <section className="profile-section profile-section--notes" aria-labelledby="profile-teacher-h">
         <div className="notes-card">
           <div className="notes-card__header">
@@ -517,6 +604,7 @@ function StudentDetailPanel({
             aria-label="Teacher notes for this student"
             placeholder="Lesson prep, follow-ups, private reminders…"
           />
+          {/* A small "Saving…" or "Saved" message once the teacher has typed something. */}
           {(notesSaveStatus === "pending" || notesSaveStatus === "saved") && (
             <p
               className="profile-teacher-notes-status"
@@ -529,6 +617,7 @@ function StudentDetailPanel({
         </div>
       </section>
 
+      {/* The pop-up for writing or editing a recap; hidden until a lesson is picked. */}
       <RecapEditorModal
         target={recapModalTarget}
         onClose={() => setRecapModalTarget(null)}
@@ -538,18 +627,27 @@ function StudentDetailPanel({
   );
 }
 
+// The whole Students page. It loads the roster, handles the search and filters, keeps track
+// of which student is selected, and shows that student's profile panel.
 export function StudentDirectory() {
+  // The web address can end with "?student=<email>" so a link (for example from the
+  // Dashboard) can open one student's profile. useSearchParams reads and changes that part.
+  // Below it: which student is selected, the roster, and every form submission by email.
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
   const [submissionsByEmail, setSubmissionsByEmail] = useState<
     Record<string, SheetStudentProfile[]>
   >({});
+  // How the roster load is going, plus a counter that goes up when the teacher clicks
+  // "Try again" (which makes the roster load again).
   const [rosterState, setRosterState] = useState<RosterFetchState>({
     status: "idle",
   });
   const [rosterRetry, setRosterRetry] = useState(0);
 
+  // How loading the selected student's latest answers and their lessons is going, each with
+  // a counter that is raised to try again.
   const [sheetFetchState, setSheetFetchState] = useState<SheetFetchState>({
     status: "idle",
   });
@@ -558,6 +656,7 @@ export function StudentDirectory() {
     useState<ScheduleFetchState>({ status: "idle" });
   const [scheduleRetryToken, setScheduleRetryToken] = useState(0);
 
+  // What is typed in the search box and chosen in the Instrument and Level dropdowns.
   const [query, setQuery] = useState("");
   const [instrument, setInstrument] = useState("");
   const [level, setLevel] = useState("");
@@ -566,8 +665,11 @@ export function StudentDirectory() {
   useEffect(() => {
     const ac = new AbortController();
     setRosterState({ status: "loading" });
+    // Ask the Apps Script for the full roster: the newest answers for each student, plus
+    // every past form submission grouped by email.
     getAllStudents({ signal: ac.signal })
       .then(({ students: profiles, submissionsByEmail: byEmail }) => {
+        // Turn rows into students (skipping rows with no email) and sort by name, A to Z.
         const list: Student[] = [];
         for (const p of profiles) {
           const s = sheetProfileToStudent(p);
@@ -578,6 +680,8 @@ export function StudentDirectory() {
         setSubmissionsByEmail(byEmail);
         setRosterState({ status: "success" });
       })
+      // On failure (not a request we cancelled on purpose), clear the lists and remember
+      // the error message.
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
         const message =
@@ -586,15 +690,19 @@ export function StudentDirectory() {
         setSubmissionsByEmail({});
         setRosterState({ status: "error", message });
       });
+    // Clean-up: cancel the request if the teacher leaves the page before it finishes.
     return () => ac.abort();
   }, [rosterRetry]);
 
+  // The choices for the Instrument dropdown: every different instrument on the roster,
+  // skipping blanks, in A to Z order.
   const instruments = useMemo(() => {
     return [...new Set(students.map((s) => s.instrument))]
       .filter((v) => v && v !== "-")
       .sort();
   }, [students]);
 
+  // The same for the Level dropdown.
   const levels = useMemo(() => {
     return [...new Set(students.map((s) => s.currentLevel))]
       .filter((v) => v && v !== "-")
@@ -620,10 +728,14 @@ export function StudentDirectory() {
     else setSelectedId(null);
   }, [searchParams, students]);
 
+  // Whenever the web address or the roster changes, select the student named in the address.
   useEffect(() => {
     syncSelectionFromUrl();
   }, [syncSelectionFromUrl]);
 
+  // Select a student (or nobody) and write the choice into the web address, so the page can
+  // be refreshed or bookmarked without losing it. "replace" keeps the browser's Back button
+  // from stepping through every single click.
   const setSelection = useCallback(
     (id: string | null) => {
       setSelectedId(id);
@@ -636,6 +748,8 @@ export function StudentDirectory() {
     [setSearchParams]
   );
 
+  // The students to show: those whose name contains the search text and who match the chosen
+  // instrument and level (a blank choice means "All").
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return students.filter((s) => {
@@ -646,6 +760,7 @@ export function StudentDirectory() {
     });
   }, [query, instrument, level, students]);
 
+  // The full roster entry for the selected student, if anyone is selected.
   const selectedStudent =
     selectedId != null
       ? students.find((s) => s.id === selectedId)
@@ -653,6 +768,7 @@ export function StudentDirectory() {
 
   // Detail: whenever a student is selected, refetch their row by email (latest sheet data).
   useEffect(() => {
+    // Nobody selected (or no email): nothing to load.
     if (!selectedStudent?.sheetEmail) {
       setSheetFetchState({ status: "idle" });
       return;
@@ -662,6 +778,7 @@ export function StudentDirectory() {
     const email = selectedStudent.sheetEmail;
     setSheetFetchState({ status: "loading" });
 
+    // Ask the Apps Script for the newest saved answers for this student's email.
     getStudentByEmail(email, { signal: ac.signal })
       .then((profile) => {
         setSheetFetchState({ status: "success", profile });
@@ -676,6 +793,9 @@ export function StudentDirectory() {
     return () => ac.abort();
   }, [selectedStudent?.sheetEmail, sheetRetryToken]);
 
+  // Also load the selected student's lessons from the "Lesson Schedule" tab. This runs again
+  // when the student changes, when their profile is retried, or when their lessons are
+  // retried (for example after a lesson is cancelled).
   useEffect(() => {
     if (!selectedStudent?.sheetEmail) {
       setScheduleFetchState({ status: "idle" });
@@ -700,17 +820,23 @@ export function StudentDirectory() {
     return () => ac.abort();
   }, [selectedStudent?.sheetEmail, sheetRetryToken, scheduleRetryToken]);
 
+  // Turn the freshly loaded sheet row into the details the profile panel shows. Until it
+  // has loaded, there is nothing to show yet.
   const detailStudent = useMemo(() => {
     if (sheetFetchState.status !== "success") return undefined;
     return sheetProfileToStudent(sheetFetchState.profile) ?? undefined;
   }, [sheetFetchState]);
 
+  // All of the selected student's past form submissions (from the roster load), for the
+  // form history section of the profile.
   const profileFormSubmissions = useMemo(() => {
     const email = selectedStudent?.sheetEmail?.trim().toLowerCase();
     if (!email) return [];
     return submissionsByEmail[email] ?? [];
   }, [selectedStudent?.sheetEmail, submissionsByEmail]);
 
+  // If the search or filters hide the selected student, close their profile, so the panel
+  // never shows someone who isn't in the visible list.
   useEffect(() => {
     if (
       selectedId != null &&
@@ -721,11 +847,13 @@ export function StudentDirectory() {
     }
   }, [filtered, rosterState.status, selectedId, setSelection]);
 
+  // Clicking a student's card opens their profile; clicking the same card again closes it.
   const handleCardClick = (id: string) => {
     if (selectedId === id) setSelection(null);
     else setSelection(id);
   };
 
+  // While the roster is still loading, show only a "please wait" page.
   if (rosterState.status === "loading" || rosterState.status === "idle") {
     return (
       <div className="page page--wide">
@@ -742,6 +870,7 @@ export function StudentDirectory() {
     );
   }
 
+  // If the roster failed to load, show the error and a "Try again" button.
   if (rosterState.status === "error") {
     return (
       <div className="page page--wide">
@@ -771,8 +900,10 @@ export function StudentDirectory() {
     );
   }
 
+  // The normal page, once the roster has loaded (JSX again: HTML-like markup with code).
   return (
     <div className="page page--wide">
+      {/* Page title and instructions. */}
       <header className="page-header">
         <h1>Students</h1>
         <p className="page-header__lede">
@@ -780,6 +911,7 @@ export function StudentDirectory() {
         </p>
       </header>
 
+      {/* Search box and Instrument / Level dropdowns, with a count of students shown. */}
       <div className="filters card">
         <div className="filters__row">
           <div className="field grow">
@@ -838,8 +970,10 @@ export function StudentDirectory() {
         </p>
       </div>
 
+      {/* Two columns: the student cards on the left and the profile panel on the right. */}
       <div className="students-split">
         <div>
+          {/* One clickable card per student: initials, name, instrument, level, last update. */}
           <div className="student-grid student-grid--compact">
             {filtered.map((s) => (
               <button
@@ -874,6 +1008,7 @@ export function StudentDirectory() {
             ))}
           </div>
 
+          {/* Nobody to show: explain whether the roster is empty or the filters are too strict. */}
           {filtered.length === 0 && (
             <p className="empty-state">
               {students.length === 0
@@ -884,6 +1019,10 @@ export function StudentDirectory() {
         </div>
 
         <div className="students-detail-column">
+          {/* The right column shows one of four things: an error if this student's answers */}
+          {/* failed to load; their profile panel once loaded; a loading message; or, if */}
+          {/* nobody is selected, a hint to pick a student. The "key" makes React start a */}
+          {/* fresh panel (with fresh notes and recaps) for each student. */}
           {selectedStudent ? (
             sheetFetchState.status === "error" ? (
               <div className="card student-detail-panel">

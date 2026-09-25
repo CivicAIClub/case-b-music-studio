@@ -1,3 +1,13 @@
+// PLAIN-ENGLISH OVERVIEW: This file is the "back office" of the music studio website. It is a
+// Google Apps Script, a small program that lives inside the studio's Google Sheet and runs on
+// Google's computers. The website (the React code in src/) can't open the Sheet, Calendar, or
+// Drive by itself, so it sends requests here, and this script does the work and replies.
+// Reading (doGet) hands the website the student roster and lesson schedule from the Sheet.
+// Writing (doPost) books or cancels lessons on Google Calendar, sets up and shares Google Drive
+// folders, and saves the teacher's lesson recaps. Every write must carry a shared password.
+// onFormSubmit runs whenever a student fills in the sign-up Google Form. The website files that
+// talk to this script are src/api/appsScriptStudent.ts, appsScriptSchedule.ts, appsScriptPost.ts.
+// The long technical note below is for developers; plain-English notes like this run throughout.
 /**
  * Case B — Music Studio: Google Apps Script backend (Code.gs)
  *
@@ -154,9 +164,15 @@
 // ──────────────────────────────────────────────────────────────────────
 
 /** Property key under which the POST shared secret is stored. */
+// SETTINGS. This section holds fixed settings the rest of the file relies on: tab names, who is
+// invited to every lesson, and who can see the shared folders.
+// "Script Properties" are a private settings box Google keeps for this script, a bit like a
+// locked drawer. Sensitive values, such as the shared password, live there, not in this file.
+// This is the label of the drawer slot where the shared password is kept.
 var SHARED_SECRET_PROPERTY_KEY = "SHARED_SECRET";
 
 /** Tab containing the lesson schedule (column titles in row 1). */
+// The name of the Sheet tab where the teacher lists every booked lesson.
 var LESSON_SCHEDULE_SHEET_NAME = "Lesson Schedule";
 
 /**
@@ -166,6 +182,8 @@ var LESSON_SCHEDULE_SHEET_NAME = "Lesson Schedule";
  * the same event without scanning calendars by metadata. Auto-created
  * by `ensureCalendarEventIdColumn` if missing.
  */
+// The title of the extra column where the script writes each lesson's calendar event ID (a code
+// Google gives every calendar event), so it can find that exact event again later.
 var CALENDAR_EVENT_ID_COLUMN = "Calendar Event ID";
 
 /**
@@ -176,6 +194,8 @@ var CALENDAR_EVENT_ID_COLUMN = "Calendar Event ID";
  * here for ongoing maintenance visibility, and Dr. Burns is the
  * always-CC'd music department contact.
  */
+// The people added as guests to every lesson the website puts on the calendar, in addition to
+// the student. Change this list to change who is always invited.
 var ALWAYS_INVITE_EMAILS = [
   "roneal@pomfret.org",
   "rburns@pomfret.org",
@@ -195,6 +215,8 @@ var ALWAYS_INVITE_EMAILS = [
  * The id is the random-looking segment in
  * https://drive.google.com/drive/folders/<id>.
  */
+// The drawer-slot label that holds the ID of the shared "Class Resources" Drive folder.
+// A folder's ID is the long code at the end of its Google Drive web address.
 var CLASS_RESOURCES_FOLDER_ID_PROPERTY_KEY = "CLASS_RESOURCES_FOLDER_ID";
 
 /**
@@ -203,6 +225,8 @@ var CLASS_RESOURCES_FOLDER_ID_PROPERTY_KEY = "CLASS_RESOURCES_FOLDER_ID";
  * owns the folder so he doesn't need to be listed. This list is the
  * canonical "music department admins + dev maintenance" set.
  */
+// Extra people (besides enrolled students) who should always be able to view, but not change,
+// the shared Class Resources folder.
 var CLASS_RESOURCES_EXTRA_VIEWERS = [
   "rburns@pomfret.org",
   "caydenauyang@gmail.com",
@@ -222,6 +246,8 @@ var CLASS_RESOURCES_EXTRA_VIEWERS = [
  * for everyone; per-student = editor for one student). Both can sit
  * inside the same shared drive.
  */
+// The drawer-slot label that holds the ID of the main "Student Resources" folder, which holds
+// one personal folder for each student.
 var STUDENT_RESOURCES_PARENT_FOLDER_ID_PROPERTY_KEY = "STUDENT_RESOURCES_PARENT_FOLDER_ID";
 
 /**
@@ -229,6 +255,8 @@ var STUDENT_RESOURCES_PARENT_FOLDER_ID_PROPERTY_KEY = "STUDENT_RESOURCES_PARENT_
  * "STUDENT_FOLDER:<email>" → folder id. Populated lazily by
  * ensureStudentFolder, never edited by hand.
  */
+// Once a student's folder is made, its ID is remembered in the drawer under a label that starts
+// with this text followed by the student's email, so it can be found quickly next time.
 var STUDENT_FOLDER_PROPERTY_PREFIX = "STUDENT_FOLDER:";
 
 /**
@@ -237,6 +265,8 @@ var STUDENT_FOLDER_PROPERTY_PREFIX = "STUDENT_FOLDER:";
  * Cayden's two emails are for ongoing dev maintenance. Mr. O'Neal owns
  * the parent so he doesn't need to be listed.
  */
+// Extra people (besides the student) who can add and change files in every student's personal
+// folder.
 var STUDENT_RESOURCES_EXTRA_EDITORS = [
   "rburns@pomfret.org",
   "caydenauyang@gmail.com",
@@ -250,6 +280,7 @@ var STUDENT_RESOURCES_EXTRA_EDITORS = [
  * startTime) so a recap binds permanently to the lesson instance it
  * was written for, even if the lesson is later rescheduled.
  */
+// The name of the Sheet tab where the teacher's lesson recaps are saved.
 var LESSON_RECAPS_SHEET_NAME = "Lesson Recaps";
 
 /**
@@ -259,6 +290,7 @@ var LESSON_RECAPS_SHEET_NAME = "Lesson Recaps";
  * Adding new columns to the right (e.g. for a future "delivered
  * to student" timestamp) is also safe.
  */
+// The column titles for the Lesson Recaps tab, in the order they are first laid out.
 var LESSON_RECAPS_HEADERS = [
   "Student Email",
   "Student Name",
@@ -271,6 +303,8 @@ var LESSON_RECAPS_HEADERS = [
   "Updated At"
 ];
 
+// NOTE: the two settings below are exact repeats of the two just above. Having them twice does
+// no harm (the second copy simply sets the same values again), but one copy could be removed.
 /**
  * Phase 5 — Teacher recaps. Tab name + canonical header order. Auto-
  * created on first save; never auto-deleted. Mirrors the
@@ -299,7 +333,14 @@ var LESSON_RECAPS_HEADERS = [
   "Updated At"
 ];
 
+// doGet answers "read" requests from the website: requests that only look at information and
+// never change anything. Google runs this automatically whenever someone opens this script's
+// web address. The website adds a note to the address saying what it wants (for example
+// "?action=list" for the roster). The answer goes back as JSON (a plain-text format for data
+// that both this script and the website understand). Read requests need no password.
 function doGet(e) {
+  // Open the studio spreadsheet and read what the website asked for: an "action" word and/or a
+  // student's email. Both are tidied up (extra spaces removed, lowercase) so they match reliably.
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const action = String(e.parameter.action || "").trim().toLowerCase();
   const email = String(e.parameter.email || "").trim().toLowerCase();
@@ -310,18 +351,23 @@ function doGet(e) {
   // (or when a tab gets manually deleted). Without the fallback those
   // students show on the roster but error out when clicked.
   if (email && !action) {
+    // First, look for the student's own tab (each student has a tab named after their email).
     const sheet = ss.getSheetByName(email);
     if (sheet) {
+      // Read everything on that tab. If there is nothing below the title row, say so.
       const data = sheet.getDataRange().getValues();
       if (data.length < 2) {
         return jsonResponse({ error: "No data found for this student" });
       }
 
+      // Row 1 holds the column titles; the last row is the student's most recent form answers.
+      // Pair each answer with its title and send it back.
       const headers = data[0];
       const lastRow = data[data.length - 1];
       return jsonResponse(rowToObject(headers, lastRow));
     }
 
+    // No personal tab? Fall back to the main form-answers tab and search it instead.
     const formSheet = ss.getSheetByName("Form Responses 1");
     if (!formSheet) {
       return jsonResponse({ error: "Student not found" });
@@ -330,6 +376,7 @@ function doGet(e) {
     if (formData.length < 2) {
       return jsonResponse({ error: "Student not found" });
     }
+    // Find which column holds the email addresses. If there is none, give up politely.
     const formHeaders = formData[0];
     const emailColIndex = formHeaders
       .map((h) => String(h).trim().toLowerCase())
@@ -337,6 +384,8 @@ function doGet(e) {
     if (emailColIndex === -1) {
       return jsonResponse({ error: "Student not found" });
     }
+    // Go down every row. Each time the email matches, remember that row, so by the end we hold the
+    // student's latest submission (lower rows are newer).
     let latestRow = null;
     for (let r = 1; r < formData.length; r++) {
       const rowEmail = String(formData[r][emailColIndex] || "")
@@ -344,6 +393,7 @@ function doGet(e) {
         .toLowerCase();
       if (rowEmail === email) latestRow = formData[r];
     }
+    // If the student never appeared, say so; otherwise send back their latest answers.
     if (!latestRow) {
       return jsonResponse({ error: "Student not found" });
     }
@@ -352,16 +402,20 @@ function doGet(e) {
 
   // 2) Student roster list — every row from "Form Responses 1".
   if (action === "list") {
+    // Open the form-answers tab, where every student sign-up lands.
     const formSheet = ss.getSheetByName("Form Responses 1");
     if (!formSheet) {
       return jsonResponse({ error: 'Sheet "Form Responses 1" not found' });
     }
 
+    // Read the whole tab. If only the title row is there, send back an empty roster.
     const data = formSheet.getDataRange().getValues();
     if (data.length < 2) {
       return jsonResponse({ students: [] });
     }
 
+    // Turn each row into a labeled record (column title and answer), and drop any row with no
+    // email, since a student without an email can't be looked up or contacted.
     const headers = data[0];
     const rows = data.slice(1);
 
@@ -374,16 +428,19 @@ function doGet(e) {
 
   // 3) All scheduled lessons.
   if (action === "schedule-list") {
+    // Open the Lesson Schedule tab the teacher keeps by hand.
     const sheet = ss.getSheetByName("Lesson Schedule");
     if (!sheet) {
       return jsonResponse({ error: "Lesson Schedule sheet not found" });
     }
 
+    // Read every lesson. If only the title row is there, send back an empty list.
     const data = sheet.getDataRange().getValues();
     if (data.length < 2) {
       return jsonResponse({ rows: [] });
     }
 
+    // Label each lesson row by column title and skip blank rows (rows with no student email).
     const headers = data[0];
     const rows = data.slice(1)
       .map((row) => rowToObject(headers, row))
@@ -394,6 +451,7 @@ function doGet(e) {
 
   // 4) One student's scheduled lessons.
   if (action === "schedule" && email) {
+    // Same as above, but for just one student.
     const sheet = ss.getSheetByName("Lesson Schedule");
     if (!sheet) {
       return jsonResponse({ error: "Lesson Schedule sheet not found" });
@@ -404,6 +462,7 @@ function doGet(e) {
       return jsonResponse({ rows: [] });
     }
 
+    // Keep only the lessons whose email matches the student asked about.
     const headers = data[0];
     const rows = data.slice(1)
       .map((row) => rowToObject(headers, row))
@@ -414,6 +473,7 @@ function doGet(e) {
     return jsonResponse({ rows });
   }
 
+  // The request didn't match any of the four kinds above, so explain what the website may ask for.
   return jsonResponse({
     error: "Missing email or invalid action. Use ?email=student@example.com, ?action=list, ?action=schedule-list, or ?action=schedule&email=student@example.com"
   });
@@ -432,16 +492,25 @@ function doGet(e) {
  * a real time component) keeps full ISO so the frontend can parse it as a
  * Date and format it with the viewer's locale.
  */
+// rowToObject turns one spreadsheet row into a labeled record, pairing each cell with the column
+// title above it (for example "Lesson Date" and its value). It is given the title row and one
+// data row, and gives back the labeled record. Along the way it fixes how dates and times look.
 function rowToObject(headers, row) {
+  // Look up the spreadsheet's time zone so dates and times are read the way the teacher sees them.
   const ssTz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
   const obj = {};
+  // Go across the row one cell at a time, pairing each cell with its column title.
   for (let i = 0; i < headers.length; i++) {
     const key = String(headers[i] || "").trim();
     const val = row[i];
     if (val instanceof Date) {
+      // Sheets secretly stores a time on its own (like "3:30 PM") as a date in the year 1899.
+      // If we see that, send just the clock time, such as "3:30 PM".
       if (val.getFullYear() < 1900) {
         obj[key] = Utilities.formatDate(val, ssTz, "h:mm a");
       } else {
+        // A real date. If its clock time is exactly midnight, it's a date with no time, so send
+        // just the day (like "2026-09-25"). Otherwise keep the full date and time.
         const wallClock = Utilities.formatDate(val, ssTz, "HH:mm:ss");
         if (wallClock === "00:00:00") {
           obj[key] = Utilities.formatDate(val, ssTz, "yyyy-MM-dd");
@@ -450,12 +519,15 @@ function rowToObject(headers, row) {
         }
       }
     } else {
+      // Anything that isn't a date (words, numbers) is passed along unchanged.
       obj[key] = val;
     }
   }
   return obj;
 }
 
+// jsonResponse packages any answer as JSON (plain-text data) so the website can read it.
+// It is given the answer and gives back a reply that Google sends to the website.
 function jsonResponse(data) {
   return ContentService
     .createTextOutput(JSON.stringify(data))
@@ -475,7 +547,12 @@ function jsonResponse(data) {
  * `handle<Action>(payload)` function returning a plain object. Throw
  * an Error to return a 200 with `{ ok: false, error: <message> }`.
  */
+// doPost handles every request that changes something: booking lessons, sharing folders, saving
+// recaps. Google runs it whenever the website sends information to this script.
+// Steps: unpack the request, check the shared password, see which job was asked for, do that
+// job, and send back the result. If anything goes wrong, the website gets a clear error message.
 function doPost(e) {
+  // Unpack the request. If it's garbled or empty, reply with an error and stop.
   var payload;
   try {
     payload = parsePostPayload(e);
@@ -483,15 +560,19 @@ function doPost(e) {
     return jsonResponse({ ok: false, error: "Invalid request body: " + err.message });
   }
 
+  // Check the shared password. If it's missing or wrong, refuse the request.
   if (!isValidSecret(payload && payload.secret)) {
     return jsonResponse({ ok: false, error: "Unauthorized" });
   }
 
+  // Read which job the website wants done (the "action"). Without one, there is nothing to do.
   var action = String((payload && payload.action) || "").trim().toLowerCase();
   if (!action) {
     return jsonResponse({ ok: false, error: "Missing 'action' in request body" });
   }
 
+  // Hand the request to the matching job. Each "case" below is one job name the website can ask
+  // for, and the function next to it does that job.
   try {
     switch (action) {
       case "ping":
@@ -524,6 +605,7 @@ function doPost(e) {
         return jsonResponse({ ok: false, error: "Unknown action: " + action });
     }
   } catch (err) {
+    // If a job ran into a problem, send its message back so the teacher sees what went wrong.
     return jsonResponse({
       ok: false,
       error: err && err.message ? err.message : "Action handler threw an unexpected error"
@@ -537,7 +619,11 @@ function doPost(e) {
  * so we tolerate text/plain (preferred, no CORS preflight) and
  * application/json equally.
  */
+// parsePostPayload opens up the request the website sent and turns its text into usable data.
+// It is given the raw request and gives back the data inside it, or stops with an error if the
+// request is empty, garbled, or not the expected kind of data.
 function parsePostPayload(e) {
+  // Make sure the request actually has a message inside it.
   if (!e || !e.postData || typeof e.postData.contents !== "string") {
     throw new Error("Empty body");
   }
@@ -545,12 +631,14 @@ function parsePostPayload(e) {
   if (!raw.trim()) {
     throw new Error("Empty body");
   }
+  // Try to read the text as JSON. If it isn't valid JSON, report that.
   var parsed;
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
     throw new Error("Body is not valid JSON");
   }
+  // The data must be a single labeled bundle (like { action, secret, ... }), not a list.
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Body must be a JSON object");
   }
@@ -562,11 +650,16 @@ function parsePostPayload(e) {
  * Properties. Returns false (not throws) on any mismatch so the response
  * shape stays uniform.
  */
+// isValidSecret checks the password the website sent against the real one kept in the drawer.
+// It is given the password that came with the request and gives back yes (true) or no (false).
 function isValidSecret(candidate) {
+  // No password sent, no real password set up yet, or the wrong length: the answer is no.
   if (typeof candidate !== "string" || !candidate) return false;
   var expected = getSharedSecret();
   if (!expected) return false;
   if (candidate.length !== expected.length) return false;
+  // Compare every character. It deliberately checks all of them, even after finding a mismatch,
+  // so an outsider can't guess the password by timing how quickly it says "no".
   var diff = 0;
   for (var i = 0; i < expected.length; i++) {
     diff |= expected.charCodeAt(i) ^ candidate.charCodeAt(i);
@@ -574,6 +667,8 @@ function isValidSecret(candidate) {
   return diff === 0;
 }
 
+// getSharedSecret fetches the real shared password from the script's settings drawer (Script
+// Properties). It gives back an empty value if none has been set.
 function getSharedSecret() {
   var props = PropertiesService.getScriptProperties();
   return props.getProperty(SHARED_SECRET_PROPERTY_KEY) || "";
@@ -586,7 +681,11 @@ function getSharedSecret() {
  * Safe to invoke directly from the Apps Script editor's Run button
  * (no arguments) — the payload is treated as optional.
  */
+// handlePing is a simple "are you there?" test. It changes nothing and just replies "pong", with
+// the current time and the spreadsheet's name, so a developer can confirm the website and this
+// script are connected and the password works.
 function handlePing(payload) {
+  // If the test included a short message, send it straight back (an "echo").
   var message = payload && typeof payload.message === "string"
     ? payload.message
     : null;
@@ -603,12 +702,17 @@ function handlePing(payload) {
 // Phase 2 — Calendar event creation
 // ──────────────────────────────────────────────────────────────────────
 
+// LESSON BOOKING: the functions in this part put lessons on Google Calendar and take them off.
 /**
  * Returns the lesson row plus the proposed event details — does NOT
  * touch the calendar. Used to populate the "preview before create"
  * modal on the Dashboard.
  */
+// handlePreviewEvent shows the teacher what a calendar event WOULD look like before it is made.
+// It is given which lesson (student email, date, start time) and gives back the proposed title,
+// times, guest list, and description. Nothing is put on the calendar here.
 function handlePreviewEvent(payload) {
+  // Find that lesson's row in the Lesson Schedule tab, then draft the event from it.
   var found = findLessonRowFromPayload(payload);
   return { ok: true, preview: buildEventPreview(found.row) };
 }
@@ -623,6 +727,9 @@ function handlePreviewEvent(payload) {
  * disables the "Create event" button when `alreadyScheduled` is true,
  * but a stale UI tab could still POST again — this guard catches that.
  */
+// handleCreateEvent puts a lesson on the teacher's Google Calendar and emails invitations.
+// It is given which lesson (student email, date, start time) and gives back the new event's ID
+// and a link to it. The real work happens in createEventLocked, just below.
 function handleCreateEvent(payload) {
   // Serialize concurrent creates against the same script. Without this, a
   // double-click on the modal Confirm button (or two browser tabs open on
@@ -630,12 +737,16 @@ function handleCreateEvent(payload) {
   // creating two calendar events with two invite emails to the student.
   // Script-level lock is sufficient — Apps Script web app concurrency is
   // already script-scoped — and 30s is well above any normal create path.
+  // In plain terms: take a "lock" (like the single key to a room) so only one booking happens at a
+  // time. If someone else holds it for 30 seconds, give up and ask the teacher to try again.
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(30 * 1000)) {
     throw new Error(
       "Another schedule is in progress for this studio. Please try again in a moment."
     );
   }
+  // Do the booking while holding the lock, and always hand the key back afterward, even if
+  // something went wrong.
   try {
     return createEventLocked(payload);
   } finally {
@@ -643,7 +754,11 @@ function handleCreateEvent(payload) {
   }
 }
 
+// createEventLocked does the actual booking, and only runs while the lock above is held.
+// It finds the lesson row, checks it hasn't already been booked, creates the calendar event,
+// and records the event's ID and a "Scheduled" status back in the Sheet.
 function createEventLocked(payload) {
+  // Find the lesson row and note which columns to write the event ID and status into.
   var found = findLessonRowFromPayload(payload);
   var sheet = found.sheet;
   var rowIndex = found.rowIndex;
@@ -656,10 +771,12 @@ function createEventLocked(payload) {
   // observed. Without this re-read, a double-click could still create
   // two events if the second request's snapshot is older than the
   // first request's commit.
+  // In plain terms: read the row again, fresh, in case another request booked it moments ago.
   var freshRow = sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()).getValues()[0];
   var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   var freshRowObj = rowToObject(headers, freshRow);
   var existingId = String(freshRowObj[CALENDAR_EVENT_ID_COLUMN] || "").trim();
+  // Already booked? Don't make a second event. Just send back the existing event's details.
   if (existingId) {
     var existingEvent = safeGetEvent(existingId);
     return {
@@ -671,11 +788,16 @@ function createEventLocked(payload) {
     };
   }
 
+  // Draft the event. If the teacher edited the guest list in the preview window, use that list;
+  // otherwise use the standard list (the student plus the always-invited people). The event goes
+  // on the main calendar of the Google account that runs this script (the teacher's calendar).
   var preview = buildEventPreview(row);
   var attendeesOverride = normalizeAttendeesOverride(payload);
   var guestsList = attendeesOverride || preview.attendees;
   var calendar = CalendarApp.getDefaultCalendar();
 
+  // Create the event with its title, start and end times, and description, and email an
+  // invitation to every guest.
   var event = calendar.createEvent(
     preview.title,
     new Date(preview.startISO),
@@ -687,13 +809,17 @@ function createEventLocked(payload) {
     }
   );
 
+  // Write the new event's ID into the lesson row and mark the lesson "Scheduled", so the website
+  // moves it from Pending to Upcoming and knows it's already booked.
   var eventId = event.getId();
   sheet.getRange(rowIndex, eventIdCol).setValue(eventId);
   if (statusCol) {
     sheet.getRange(rowIndex, statusCol).setValue("Scheduled");
   }
+  // Save the changes to the Sheet right away, before replying to the website.
   SpreadsheetApp.flush();
 
+  // Tell the website it worked, with the event ID and a link to open it in Google Calendar.
   return {
     ok: true,
     alreadyScheduled: false,
@@ -708,7 +834,11 @@ function createEventLocked(payload) {
  * cancelled — calling cancel on a row that was never scheduled is a
  * clean no-op and leaves Status untouched. Does not delete the sheet row.
  */
+// handleCancelEvent takes a lesson off Google Calendar. It is given which lesson (student email,
+// date, start time). It deletes the event, clears the saved event ID, and marks the lesson
+// "Cancelled". The lesson row itself stays in the Sheet.
 function handleCancelEvent(payload) {
+  // Find the lesson row and the columns we may need to update.
   var found = findLessonRowFromPayload(payload);
   var sheet = found.sheet;
   var rowIndex = found.rowIndex;
@@ -716,14 +846,18 @@ function handleCancelEvent(payload) {
   var eventIdCol = found.calendarEventIdCol;
   var statusCol = found.statusCol;
 
+  // If the lesson was never booked, there's nothing to cancel, so say so and change nothing.
   var existingId = String(row[CALENDAR_EVENT_ID_COLUMN] || "").trim();
   if (!existingId) {
     return { ok: true, cancelled: false, reason: "No event to cancel for this lesson row." };
   }
 
+  // Find the event on the calendar and delete it. If someone already deleted it by hand in
+  // Google Calendar, skip this step quietly.
   var existing = safeGetEvent(existingId);
   if (existing) existing.deleteEvent();
 
+  // Clear the saved event ID, mark the lesson "Cancelled", and save the Sheet right away.
   sheet.getRange(rowIndex, eventIdCol).setValue("");
   if (statusCol) {
     sheet.getRange(rowIndex, statusCol).setValue("Cancelled");
@@ -741,6 +875,10 @@ function handleCancelEvent(payload) {
  * Touch every service the deployed code uses so the prompt covers
  * everything in one go. Safe to re-run — purely read-only.
  */
+// authorize is run by hand, once, from the Apps Script editor (not by the website). Google asks
+// the account owner for permission before a script may use their Calendar or Drive. This touches
+// each Google service once so all the permission pop-ups appear together, and writes a short
+// report to the log showing whether each piece is set up correctly.
 function authorize() {
   // Touch each service so Apps Script knows it must request the
   // corresponding OAuth scope. Logger output is purely informational.
@@ -754,6 +892,7 @@ function authorize() {
   var rootName = DriveApp.getRootFolder().getName();
   var props = PropertiesService.getScriptProperties();
 
+  // Look up the two configured Drive folders by name, so a wrong folder ID shows up here clearly.
   var classResourcesName = resolveFolderNameForAuthorize(
     props.getProperty(CLASS_RESOURCES_FOLDER_ID_PROPERTY_KEY)
   );
@@ -761,6 +900,7 @@ function authorize() {
     props.getProperty(STUDENT_RESOURCES_PARENT_FOLDER_ID_PROPERTY_KEY)
   );
 
+  // Write a short report to the editor's "Execution log" panel, and return the same details.
   Logger.log("Spreadsheet:              " + ssName);
   Logger.log("Calendar:                 " + calName);
   Logger.log("Drive root:               " + rootName);
@@ -785,6 +925,8 @@ function authorize() {
  * human-readable name for the execution log. Never throws; surfaces
  * any Drive error inline so the teacher sees what to fix.
  */
+// resolveFolderNameForAuthorize turns a folder ID into the folder's name for the report above.
+// It says "(not configured)" if no ID was set, or shows Google's error if the ID doesn't work.
 function resolveFolderNameForAuthorize(folderId) {
   if (!folderId) return "(not configured)";
   try {
@@ -806,35 +948,46 @@ function resolveFolderNameForAuthorize(folderId) {
  * Throws (the message bubbles back to the frontend as `ok:false`)
  * when the sheet is missing, the row isn't found, or the key is bad.
  */
+// findLessonRowFromPayload finds one lesson in the Lesson Schedule tab. A lesson is identified by
+// three things together: the student's email, the lesson date, and the start time. It gives back
+// the tab, the row number, the row's contents, and which columns hold the event ID and status.
+// If the lesson can't be found, it stops with a message the teacher will see on the website.
 function findLessonRowFromPayload(payload) {
+  // Pull the three identifying details out of the request and tidy them up.
   var studentEmail = String((payload && payload.studentEmail) || "")
     .trim()
     .toLowerCase();
   var lessonDate = String((payload && payload.lessonDate) || "").trim();
   var startTime = String((payload && payload.startTime) || "").trim();
 
+  // All three are required; if any is missing, stop and say which one.
   if (!studentEmail) throw new Error("Missing studentEmail");
   if (!lessonDate) throw new Error("Missing lessonDate");
   if (!startTime) throw new Error("Missing startTime");
 
+  // Open the Lesson Schedule tab.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(LESSON_SCHEDULE_SHEET_NAME);
   if (!sheet) {
     throw new Error('Sheet "' + LESSON_SCHEDULE_SHEET_NAME + '" not found');
   }
 
+  // Make sure the "Calendar Event ID" column exists (it's added automatically the first time).
   ensureCalendarEventIdColumn(sheet);
 
+  // Read the whole tab. Row 1 holds the column titles.
   var data = sheet.getDataRange().getValues();
   if (data.length < 2) throw new Error("Lesson Schedule sheet has no rows");
   var headers = data[0];
 
+  // Work out which column is which by its title, so the teacher can reorder columns safely.
   var emailCol = headerIndex(headers, "Student Email");
   var dateCol = headerIndex(headers, "Lesson Date");
   var startCol = headerIndex(headers, "Start Time");
   var statusCol = headerIndex(headers, "Status");
   var eventIdCol = headerIndex(headers, CALENDAR_EVENT_ID_COLUMN);
 
+  // If a required column is missing, stop with a message naming it.
   if (emailCol === -1) throw new Error('Column "Student Email" not found');
   if (dateCol === -1) throw new Error('Column "Lesson Date" not found');
   if (startCol === -1) throw new Error('Column "Start Time" not found');
@@ -842,6 +995,8 @@ function findLessonRowFromPayload(payload) {
     'Column "' + CALENDAR_EVENT_ID_COLUMN + '" not found (auto-init failed?)'
   );
 
+  // Go down the lessons one by one, looking for the row whose email, date, and start time all
+  // match. Dates and times are rewritten in the same style the website uses before comparing.
   var ssTz = ss.getSpreadsheetTimeZone();
   var matchRowIndex = -1;
 
@@ -859,6 +1014,7 @@ function findLessonRowFromPayload(payload) {
     break;
   }
 
+  // No match: tell the teacher which lesson couldn't be found.
   if (matchRowIndex === -1) {
     throw new Error(
       "No matching row in Lesson Schedule for " + studentEmail +
@@ -866,6 +1022,8 @@ function findLessonRowFromPayload(payload) {
     );
   }
 
+  // Found it: send back the row as a labeled record plus where it lives in the Sheet.
+  // (Sheet rows and columns count from 1, while the code counts from 0, hence the "+ 1".)
   var rowObj = rowToObject(headers, data[matchRowIndex - 1]);
   return {
     sheet: sheet,
@@ -882,13 +1040,17 @@ function findLessonRowFromPayload(payload) {
  * lookup so the column appears the first time the teacher uses Phase 2,
  * without requiring a manual sheet edit.
  */
+// ensureCalendarEventIdColumn adds a "Calendar Event ID" column to the end of the Lesson
+// Schedule tab if it isn't there yet, and styles it. If the column already exists, it does nothing.
 function ensureCalendarEventIdColumn(sheet) {
+  // Read the title row, and stop if the tab is empty or the column is already there.
   var lastCol = sheet.getLastColumn();
   if (lastCol < 1) return;
   var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
   for (var i = 0; i < headers.length; i++) {
     if (String(headers[i]).trim() === CALENDAR_EVENT_ID_COLUMN) return;
   }
+  // Otherwise, add the title in the next empty column, in bold white on the studio's crimson.
   var newCol = lastCol + 1;
   sheet.getRange(1, newCol)
     .setValue(CALENDAR_EVENT_ID_COLUMN)
@@ -914,11 +1076,17 @@ function ensureCalendarEventIdColumn(sheet) {
  * "at least one attendee", so an empty array hitting this side is a bug
  * worth surfacing rather than silently falling back.
  */
+// normalizeAttendeesOverride checks the guest list the teacher may have edited in the preview
+// window. It gives back a clean list (no blanks, no repeats, only real-looking email addresses),
+// or nothing if the teacher didn't send a list, in which case the standard list is used.
 function normalizeAttendeesOverride(payload) {
+  // No list sent: use the standard guest list instead.
   if (!payload || !("attendees" in payload)) return null;
   if (!Array.isArray(payload.attendees)) {
     throw new Error("attendees must be an array of email strings");
   }
+  // Go through each guest, skipping blanks and repeats, and stop with an error on anything that
+  // doesn't look like an email address (something@something.something).
   var seen = {};
   var out = [];
   for (var i = 0; i < payload.attendees.length; i++) {
@@ -936,6 +1104,7 @@ function normalizeAttendeesOverride(payload) {
     seen[k] = true;
     out.push(v);
   }
+  // An empty list is a mistake (a lesson needs at least one guest), so report it.
   if (out.length === 0) {
     throw new Error("At least one attendee is required.");
   }
@@ -943,7 +1112,11 @@ function normalizeAttendeesOverride(payload) {
 }
 
 /** Builds the calendar event metadata for one row (preview + create share this). */
+// buildEventPreview drafts a calendar event from one lesson row. It is given the row and gives
+// back the event's title, start and end times, guest list, and description, plus whether the
+// lesson is already on the calendar. Both the preview window and the real booking use it.
 function buildEventPreview(row) {
+  // Pull out each piece of the lesson row, trimmed of stray spaces.
   var studentName = String(row["Student Name"] || "").trim();
   var studentEmail = String(row["Student Email"] || "").trim();
   var lessonFocus = String(row["Lesson Focus"] || "").trim();
@@ -954,11 +1127,13 @@ function buildEventPreview(row) {
   var endTime = String(row["End Time"] || "").trim();
   var existingEventId = String(row[CALENDAR_EVENT_ID_COLUMN] || "").trim();
 
+  // Combine the date with the start and end times, using the spreadsheet's time zone.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var tz = ss.getSpreadsheetTimeZone();
   var startDate = parseLessonDateTime(lessonDate, startTime, tz);
   var endDate = parseLessonDateTime(lessonDate, endTime, tz);
 
+  // If the date or times can't be understood, stop and show what was in the row.
   if (!startDate || !endDate) {
     throw new Error(
       "Could not parse lesson date/time: date='" + lessonDate +
@@ -979,11 +1154,15 @@ function buildEventPreview(row) {
     }
   }
 
+  // Title: "Student Name - Lesson Focus", or "Student Name - Music Lesson" if no focus is set.
+  // If the row has no name, the student's email is used instead.
   var displayName = studentName || studentEmail;
   var title = lessonFocus
     ? displayName + " - " + lessonFocus
     : displayName + " - Music Lesson";
 
+  // Description: the student, block, focus, and notes, each on its own line, followed by a
+  // reminder that the event was made by the dashboard.
   var descriptionParts = [];
   descriptionParts.push("Student: " + displayName + " <" + studentEmail + ">");
   if (lessonBlock) descriptionParts.push("Block: " + lessonBlock);
@@ -1006,11 +1185,13 @@ function buildEventPreview(row) {
     var e = ALWAYS_INVITE_EMAILS[i];
     if (e) attendeeSet[e.toLowerCase()] = e.toLowerCase();
   }
+  // Turn the de-duplicated guests into a simple list.
   var attendees = [];
   Object.keys(attendeeSet).forEach(function (k) {
     attendees.push(attendeeSet[k]);
   });
 
+  // Hand back everything the preview window and the booking step need.
   return {
     title: title,
     startISO: startDate.toISOString(),
@@ -1033,11 +1214,16 @@ function buildEventPreview(row) {
  * ("h:mm AM/PM" or "HH:mm") into a Date interpreted in the given
  * timezone. Returns null on parse failure.
  */
+// parseLessonDateTime joins a date (like "2026-09-25") and a clock time (like "3:30 PM") into one
+// exact moment in the spreadsheet's time zone. It gives back nothing if either can't be read.
 function parseLessonDateTime(dateStr, timeStr, tz) {
+  // Check the date is written as year-month-day, and read the clock time.
   var dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
   if (!dateMatch) return null;
   var hm = parseWallClockTime(timeStr);
   if (!hm) return null;
+  // Rebuild the moment as text like "2026-09-25 15:30:00" and let Google convert it using the
+  // right time zone.
   var hh = hm.h < 10 ? "0" + hm.h : "" + hm.h;
   var mm = hm.m < 10 ? "0" + hm.m : "" + hm.m;
   var iso = dateStr + " " + hh + ":" + mm + ":00";
@@ -1048,19 +1234,26 @@ function parseLessonDateTime(dateStr, timeStr, tz) {
   }
 }
 
+// parseWallClockTime reads a clock time typed like "3:30 PM" or "15:30" and gives back the hour
+// (0 to 23) and minutes. It gives back nothing if the text isn't a sensible time.
 function parseWallClockTime(timeStr) {
+  // Check the text looks like a time: hours, a colon, minutes, and maybe AM or PM.
   var m = /^(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?$/.exec(String(timeStr).trim());
   if (!m) return null;
   var h = parseInt(m[1], 10);
   var min = parseInt(m[2], 10);
   var ampm = m[3] ? m[3].toUpperCase() : "";
+  // Convert to a 24-hour clock: 3 PM becomes 15, and 12 AM (midnight) becomes 0.
   if (ampm === "PM" && h !== 12) h += 12;
   if (ampm === "AM" && h === 12) h = 0;
+  // Reject impossible times like 25:00 or 10:75.
   if (h < 0 || h > 23 || min < 0 || min > 59) return null;
   return { h: h, m: min };
 }
 
 /** "yyyy-MM-dd" string from a value that may already be a Date or a string. */
+// normalizeSheetDate makes sure a date from the Sheet is written as "year-month-day" text,
+// whether the cell held a real date or typed text, so dates can be compared reliably.
 function normalizeSheetDate(val, tz) {
   if (val instanceof Date) {
     return Utilities.formatDate(val, tz, "yyyy-MM-dd");
@@ -1074,6 +1267,8 @@ function normalizeSheetDate(val, tz) {
  * already formats those correctly. We mirror that logic here so a row
  * lookup matches what the frontend received and is sending back.
  */
+// normalizeSheetTime does the same for clock times, writing them like "3:30 PM", so a time from
+// the Sheet matches the time the website sends back.
 function normalizeSheetTime(val, tz) {
   if (val instanceof Date) {
     if (val.getFullYear() < 1900) {
@@ -1084,6 +1279,8 @@ function normalizeSheetTime(val, tz) {
   return String(val || "").trim();
 }
 
+// headerIndex finds which column has a given title. It gives back the column's position
+// (counting from 0), or -1 if no column has that title.
 function headerIndex(headers, name) {
   for (var i = 0; i < headers.length; i++) {
     if (String(headers[i]).trim() === name) return i;
@@ -1092,6 +1289,8 @@ function headerIndex(headers, name) {
 }
 
 /** Returns the calendar event or null if it's been deleted out of band. */
+// safeGetEvent looks up a calendar event by its ID. If the event was deleted or can't be found,
+// it gives back nothing instead of crashing.
 function safeGetEvent(eventId) {
   try {
     return CalendarApp.getDefaultCalendar().getEventById(eventId);
@@ -1101,6 +1300,9 @@ function safeGetEvent(eventId) {
 }
 
 /** Best-effort link to the event in Google Calendar. */
+// eventEditUrl builds a web link that opens the event in Google Calendar for editing. Google
+// expects the event's ID and the calendar's ID together, scrambled into a code (base64, a
+// standard way of turning text into letters and numbers that are safe to put in a link).
 function eventEditUrl(event) {
   // event.getId() is "<id>@google.com"; the editor expects just the id part
   var raw = event.getId();
@@ -1114,6 +1316,8 @@ function eventEditUrl(event) {
 // Phase 3 — Class Resources (shared Drive folder)
 // ──────────────────────────────────────────────────────────────────────
 
+// SHARED CLASS FOLDER: one Google Drive folder of class materials that every student can view
+// (but not change).
 /**
  * Returns a snapshot of the Class Resources folder for the Dashboard:
  * folder metadata + a list of its top-level children. Read-only — does
@@ -1124,7 +1328,11 @@ function eventEditUrl(event) {
  * time descending, so the most recently touched material surfaces first
  * even if the folder grows.
  */
+// handleListClassResources gives the website a list of what's in the shared Class Resources
+// folder: the folder's name and link, plus its files and sub-folders, newest first.
+// It only looks; it never changes who can see the folder.
 function handleListClassResources(payload) {
+  // Open the folder, list what's inside, and send both back.
   var folder = getClassResourcesFolder();
   var files = listFolderFiles(folder);
   return {
@@ -1150,9 +1358,15 @@ function handleListClassResources(payload) {
  * The script owner is intentionally excluded from the grant loop — they
  * own the folder and addViewer would error.
  */
+// handleSyncClassResourcesAccess gives every student on the roster (plus the extra people in the
+// settings) permission to VIEW the shared Class Resources folder. It never removes anyone.
+// It reports back who was newly added, who already had access, and any addresses that failed.
 function handleSyncClassResourcesAccess(payload) {
+  // Open the folder.
   var folder = getClassResourcesFolder();
 
+  // Gather everyone who should see it: every roster email plus the extra viewers from the
+  // settings, tidied to lowercase.
   var rosterEmails = getStudentEmails();
   var extraEmails = (CLASS_RESOURCES_EXTRA_VIEWERS || []).map(function (e) {
     return String(e || "").trim().toLowerCase();
@@ -1163,6 +1377,8 @@ function handleSyncClassResourcesAccess(payload) {
   // entity, null, or throw), so also skip the email of the user the
   // web app runs as — that's the canonical "the script owner already
   // has access" check, and it works in both My Drive and shared drives.
+  // In plain terms: skip the folder's owner and the account running this script. They already
+  // have full access, and Google would refuse to add them as viewers.
   var skip = {};
   try {
     var ownerEmail = String(folder.getOwner().getEmail() || "").toLowerCase();
@@ -1177,6 +1393,7 @@ function handleSyncClassResourcesAccess(payload) {
     // Session.getEffectiveUser is gated by scope on some accounts; safe to ignore.
   }
 
+  // Build the final list of people to add, skipping blanks, the owner, and repeats.
   var seen = {};
   var targets = [];
   rosterEmails.concat(extraEmails).forEach(function (email) {
@@ -1187,6 +1404,7 @@ function handleSyncClassResourcesAccess(payload) {
     targets.push(email);
   });
 
+  // Find out who can already see or edit the folder, so we don't add them twice.
   var existingViewers = {};
   try {
     folder.getViewers().forEach(function (user) {
@@ -1202,10 +1420,13 @@ function handleSyncClassResourcesAccess(payload) {
     // Treat as "no prior access known" and let addViewer be the source of truth.
   }
 
+  // Keep three tallies for the report: newly added, already had access, and failures.
   var granted = [];
   var alreadyHadAccess = [];
   var errors = [];
 
+  // Go through each person. If they already have access, note it. Otherwise give them view
+  // access. If Google refuses (for example, a mistyped email), note the error and keep going.
   targets.forEach(function (email) {
     if (existingViewers[email]) {
       alreadyHadAccess.push(email);
@@ -1222,6 +1443,7 @@ function handleSyncClassResourcesAccess(payload) {
     }
   });
 
+  // Send the report back to the website.
   return {
     ok: true,
     folder: { id: folder.getId(), name: folder.getName() },
@@ -1236,6 +1458,7 @@ function handleSyncClassResourcesAccess(payload) {
 // ──────────────────────────────────────────────────────────────────────
 
 /** Maximum number of children returned by handleListClassResources. */
+// At most 100 items are shown on the dashboard, so a very full folder doesn't slow the page.
 var CLASS_RESOURCES_LIST_CAP = 100;
 
 /**
@@ -1245,7 +1468,11 @@ var CLASS_RESOURCES_LIST_CAP = 100;
  * messages bubble back to the dashboard as the action's error so the
  * teacher sees what to fix.
  */
+// getClassResourcesFolder opens the shared Class Resources folder using the ID saved in the
+// settings drawer. If no ID has been saved, or the ID doesn't open a folder, it stops with a
+// message telling the teacher exactly what to fix.
 function getClassResourcesFolder() {
+  // Look up the saved folder ID. If there isn't one, explain how to set it.
   var folderId = PropertiesService.getScriptProperties()
     .getProperty(CLASS_RESOURCES_FOLDER_ID_PROPERTY_KEY);
   if (!folderId) {
@@ -1255,6 +1482,7 @@ function getClassResourcesFolder() {
       '" Script Property to the folder id from its Drive URL.'
     );
   }
+  // Try to open the folder. If Google can't, pass along why.
   try {
     return DriveApp.getFolderById(folderId);
   } catch (err) {
@@ -1273,9 +1501,13 @@ function getClassResourcesFolder() {
  * iconLink falls back to a Drive-hosted generic icon when Apps Script
  * doesn't expose one for the mime type.
  */
+// listFolderFiles lists what's directly inside a Drive folder (files and sub-folders, but not
+// what's inside those sub-folders). For each item it gives back its name, type, last-changed
+// time, link, and a small icon, sorted newest first and capped at 100 items.
 function listFolderFiles(folder) {
   var entries = [];
 
+  // Go through every file in the folder and note its details.
   var fileIter = folder.getFiles();
   while (fileIter.hasNext()) {
     var f = fileIter.next();
@@ -1290,6 +1522,7 @@ function listFolderFiles(folder) {
     });
   }
 
+  // Then do the same for every sub-folder.
   var subIter = folder.getFolders();
   while (subIter.hasNext()) {
     var sf = subIter.next();
@@ -1304,10 +1537,12 @@ function listFolderFiles(folder) {
     });
   }
 
+  // Put the most recently changed items first.
   entries.sort(function (a, b) {
     return (b.modifiedTime || "").localeCompare(a.modifiedTime || "");
   });
 
+  // If there are more than 100, keep only the newest 100.
   if (entries.length > CLASS_RESOURCES_LIST_CAP) {
     entries = entries.slice(0, CLASS_RESOURCES_LIST_CAP);
   }
@@ -1319,6 +1554,9 @@ function listFolderFiles(folder) {
  * 16-px icons keyed by mime type; falling back to the generic file
  * icon when the type isn't recognized keeps the UI tidy.
  */
+// iconLinkForMimeType gives back the web address of Google Drive's small icon for a kind of file
+// (a "mime type" is a standard label for a file's kind, like PDF or spreadsheet).
+// If the kind is unknown, it uses a plain generic-file icon.
 function iconLinkForMimeType(mimeType) {
   var base = "https://drive-thirdparty.googleusercontent.com/16/type/";
   if (!mimeType) return base + "application/octet-stream";
@@ -1331,7 +1569,10 @@ function iconLinkForMimeType(mimeType) {
  * Drive will reject genuinely malformed addresses on addViewer, and
  * the sync handler reports those as per-email errors.
  */
+// getStudentEmails reads the form-answers tab and gives back every student's email address,
+// once each, in lowercase, skipping blank rows. It's used when sharing folders with the roster.
 function getStudentEmails() {
+  // Open the form-answers tab and read everything on it.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("Form Responses 1");
   if (!sheet) {
@@ -1340,6 +1581,7 @@ function getStudentEmails() {
   var data = sheet.getDataRange().getValues();
   if (data.length < 2) return [];
 
+  // Find the email column by its title.
   var headers = data[0].map(function (h) {
     return String(h || "").trim().toLowerCase();
   });
@@ -1348,6 +1590,7 @@ function getStudentEmails() {
     throw new Error('Could not find "Email Address" column in Form Responses 1');
   }
 
+  // Collect each email once, even if a student submitted the form more than once.
   var seen = {};
   var emails = [];
   for (var r = 1; r < data.length; r++) {
@@ -1364,16 +1607,23 @@ function getStudentEmails() {
 // Phase 4 — Student Resources (per-student Drive folders, editor access)
 // ──────────────────────────────────────────────────────────────────────
 
+// PERSONAL STUDENT FOLDERS: each student gets their own Drive folder that they can add files to
+// (recordings, marked-up music, and so on).
 /**
  * Returns the per-student folder for one student plus its top-level
  * children. Auto-creates the folder on first call (idempotent, with the
  * student granted editor access) so the dashboard never has to know
  * whether the folder exists yet.
  */
+// handleListStudentFolder is used when the teacher opens a student's profile on the website.
+// It makes sure that student has a personal Drive folder (creating it if needed) and gives back
+// the folder's name and link plus a list of what's inside it.
 function handleListStudentFolder(payload) {
+  // Work out which student this is, make sure their folder exists, then list its contents.
   var resolved = resolveStudentFromPayload(payload);
   var ensured = ensureStudentFolder(resolved.email, resolved.name);
   var files = listFolderFiles(ensured.folder);
+  // Send back the folder details, the student, and the file list.
   return {
     ok: true,
     folder: {
@@ -1393,7 +1643,10 @@ function handleListStudentFolder(payload) {
  * Used internally by sync-student-folders so the bulk sync doesn't pay
  * the per-student `listFolderFiles` cost for every row.
  */
+// handleEnsureStudentFolder does the same as above but skips listing the files, for when only
+// the folder itself (and its link) is needed.
 function handleEnsureStudentFolder(payload) {
+  // Work out which student this is, make sure their folder exists, and send back its details.
   var resolved = resolveStudentFromPayload(payload);
   var ensured = ensureStudentFolder(resolved.email, resolved.name);
   return {
@@ -1416,14 +1669,22 @@ function handleEnsureStudentFolder(payload) {
  *
  * Idempotent. Safe to re-run after adding new students to the form.
  */
+// handleSyncStudentFolders is the "Sync all student folders" button on the Dashboard. It goes
+// through every student on the roster and makes sure each has a personal folder with the right
+// sharing. It reports which folders were newly made, which already existed, and any failures.
 function handleSyncStudentFolders(payload) {
+  // Open the main Student Resources folder (this stops early if it isn't set up), and get the
+  // roster of students with their names.
   var parent = getStudentResourcesParentFolder();
   var students = getStudentRoster(); // [{ email, name }, ...]
 
+  // Three tallies for the report.
   var created = [];
   var existed = [];
   var errors = [];
 
+  // For each student, make sure their folder exists. One student's problem is noted and doesn't
+  // stop the rest.
   students.forEach(function (s) {
     try {
       var ensured = ensureStudentFolder(s.email, s.name);
@@ -1440,6 +1701,7 @@ function handleSyncStudentFolders(payload) {
     }
   });
 
+  // Send the report back to the website.
   return {
     ok: true,
     parent: { id: parent.getId(), name: parent.getName() },
@@ -1459,12 +1721,17 @@ function handleSyncStudentFolders(payload) {
  * have a row for this email yet, we fall back to the email itself for
  * the folder name.
  */
+// resolveStudentFromPayload reads the student's email from the website's request and looks up
+// their name on the roster. It gives back both. The name may be blank if the student isn't on
+// the roster yet.
 function resolveStudentFromPayload(payload) {
+  // Tidy the email and stop if it's missing.
   var email = String((payload && payload.studentEmail) || "")
     .trim()
     .toLowerCase();
   if (!email) throw new Error("Missing studentEmail");
 
+  // Look up the student's name from the form answers.
   var nameByEmail = getStudentNameMap();
   var name = nameByEmail[email] || "";
   return { email: email, name: name };
@@ -1475,7 +1742,11 @@ function resolveStudentFromPayload(payload) {
  * Same shape as getClassResourcesFolder — throws a teacher-friendly
  * message when the property is unset or the ID is bad.
  */
+// getStudentResourcesParentFolder opens the main Student Resources folder (the one that holds
+// every student's personal folder), using the ID saved in the settings drawer. If the ID is
+// missing or wrong, it stops with a message telling the teacher what to fix.
 function getStudentResourcesParentFolder() {
+  // Look up the saved folder ID. If there isn't one, explain how to set it.
   var folderId = PropertiesService.getScriptProperties()
     .getProperty(STUDENT_RESOURCES_PARENT_FOLDER_ID_PROPERTY_KEY);
   if (!folderId) {
@@ -1485,6 +1756,7 @@ function getStudentResourcesParentFolder() {
       '" Script Property to the folder id from its Drive URL.'
     );
   }
+  // Try to open the folder. If Google can't, pass along why.
   try {
     return DriveApp.getFolderById(folderId);
   } catch (err) {
@@ -1511,7 +1783,11 @@ function getStudentResourcesParentFolder() {
  * file contents, never lower a permission, and never delete a stale
  * folder (in case the teacher has work-in-progress in it).
  */
+// ensureStudentFolder makes sure one student has their own Drive folder they can add files to.
+// It is given the student's email and name. It gives back the folder and whether it was just
+// created. It never deletes a folder and never takes away anyone's access.
 function ensureStudentFolder(email, name) {
+  // An email is required to know whose folder this is.
   if (!email) throw new Error("ensureStudentFolder requires an email");
 
   // Serialize concurrent calls for the same student. Without this, two
@@ -1519,12 +1795,15 @@ function ensureStudentFolder(email, name) {
   // never-seen-before email both miss the cache and call createFolder,
   // ending up with two duplicate per-student folders. 30s lock is well
   // above any normal create + permission grant.
+  // In plain terms: take the lock so two requests can't make two folders for the same student.
+  // If it stays busy for 30 seconds, ask the teacher to try again.
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(30 * 1000)) {
     throw new Error(
       "Another folder operation is in progress. Please retry in a moment."
     );
   }
+  // Do the work while holding the lock, then always give the lock back.
   try {
     return ensureStudentFolderLocked(email, name);
   } finally {
@@ -1532,12 +1811,18 @@ function ensureStudentFolder(email, name) {
   }
 }
 
+// ensureStudentFolderLocked does the real work of ensureStudentFolder while the lock is held.
+// It first checks the settings drawer for a remembered folder ID; if there isn't a working one,
+// it creates a new folder. Either way, it then makes sure the right people can edit it.
 function ensureStudentFolderLocked(email, name) {
+  // Open the main Student Resources folder and look for this student's remembered folder ID.
   var parent = getStudentResourcesParentFolder();
   var props = PropertiesService.getScriptProperties();
   var cacheKey = STUDENT_FOLDER_PROPERTY_PREFIX + email;
   var cachedId = props.getProperty(cacheKey);
 
+  // If we have a remembered ID, try to open that folder. If it no longer works (for example, it
+  // was deleted), forget the ID so a new folder is made below.
   var folder = null;
   if (cachedId) {
     try {
@@ -1548,18 +1833,21 @@ function ensureStudentFolderLocked(email, name) {
     }
   }
 
+  // No usable folder: make a new one named after the student, and remember its ID.
   var created = false;
   if (!folder) {
     folder = parent.createFolder(studentFolderName(name, email));
     props.setProperty(cacheKey, folder.getId());
     created = true;
   } else {
+    // Folder already exists: if the student's name has changed on the form, rename the folder.
     var desiredName = studentFolderName(name, email);
     if (folder.getName() !== desiredName && name) {
       folder.setName(desiredName);
     }
   }
 
+  // Make sure the student and the extra editors can add and change files in the folder.
   applyStudentFolderPermissions(folder, email);
   return { folder: folder, created: created };
 }
@@ -1574,9 +1862,13 @@ function ensureStudentFolderLocked(email, name) {
  * listing for the teacher. The dashboard's "Sync student folders"
  * backfill button can re-try later.
  */
+// applyStudentFolderPermissions gives the student, plus the extra editors from the settings,
+// permission to add and change files in the student's folder. People who already have that
+// access are left alone. If Google refuses an address, it's noted in the log and skipped.
 function applyStudentFolderPermissions(folder, studentEmail) {
   var normalizedStudent = String(studentEmail || "").trim().toLowerCase();
 
+  // Find out who can already edit this folder.
   var existing = {};
   try {
     folder.getEditors().forEach(function (u) {
@@ -1587,6 +1879,7 @@ function applyStudentFolderPermissions(folder, studentEmail) {
     // Some shared-drive edge cases — fall through to addEditor as source of truth.
   }
 
+  // Skip the folder's owner and the account running this script; they already have access.
   var skip = {};
   try {
     var ownerEmail = String(folder.getOwner().getEmail() || "").toLowerCase();
@@ -1601,6 +1894,7 @@ function applyStudentFolderPermissions(folder, studentEmail) {
     // Session.getEffectiveUser is gated by scope on some accounts; safe to ignore.
   }
 
+  // Build the list of people who should be editors: the student first, then the extras.
   var targets = [];
   if (normalizedStudent) targets.push(normalizedStudent);
   (STUDENT_RESOURCES_EXTRA_EDITORS || []).forEach(function (e) {
@@ -1608,6 +1902,7 @@ function applyStudentFolderPermissions(folder, studentEmail) {
     if (trimmed) targets.push(trimmed);
   });
 
+  // Add each person as an editor unless they are skipped or already have access.
   targets.forEach(function (em) {
     if (!em) return;
     if (skip[em]) return;
@@ -1634,6 +1929,9 @@ function applyStudentFolderPermissions(folder, studentEmail) {
  * folder name makes it easy for the teacher to find a folder in Drive
  * directly when the cache is empty / mid-debugging.
  */
+// studentFolderName decides what a student's folder is called: "Name - email" when the name is
+// known, or just the email when it isn't. Keeping the email in the name makes folders easy to
+// find in Drive.
 function studentFolderName(name, email) {
   var trimmed = String(name || "").trim();
   if (!trimmed) return String(email).trim();
@@ -1645,12 +1943,17 @@ function studentFolderName(name, email) {
  * latest non-empty name wins for a given email). Used by
  * `resolveStudentFromPayload` for per-student lookups.
  */
+// getStudentNameMap reads the form-answers tab and builds a lookup from each student's email to
+// their name. If a student submitted the form more than once, the latest name is used.
+// It gives back an empty lookup if the tab or the email column is missing.
 function getStudentNameMap() {
+  // Open the form-answers tab and read everything on it.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("Form Responses 1");
   if (!sheet) return {};
   var data = sheet.getDataRange().getValues();
   if (data.length < 2) return {};
+  // Find the email column and the name column (titled "First and Last Name", or just "Name").
   var headers = data[0].map(function (h) {
     return String(h || "").trim().toLowerCase();
   });
@@ -1659,6 +1962,8 @@ function getStudentNameMap() {
   if (nameCol === -1) nameCol = headers.indexOf("name");
   if (emailCol === -1) return {};
 
+  // Go down every row and record each email's name. A later row replaces an earlier one, and an
+  // email with no name is still listed (with a blank name).
   var out = {};
   for (var r = 1; r < data.length; r++) {
     var em = String(data[r][emailCol] || "").trim().toLowerCase();
@@ -1675,6 +1980,8 @@ function getStudentNameMap() {
  * sync handler. Same source of truth as `getStudentEmails` (Form
  * Responses 1); the name is best-effort and may be empty.
  */
+// getStudentRoster gives back the list of students, each with an email and a name (the name
+// may be blank). It combines the two helpers just above.
 function getStudentRoster() {
   var emails = getStudentEmails();
   var nameByEmail = getStudentNameMap();
@@ -1687,13 +1994,19 @@ function getStudentRoster() {
 // Phase 5 — Teacher recaps
 // ──────────────────────────────────────────────────────────────────────
 
+// LESSON RECAPS: after each lesson the teacher writes a short structured summary for the
+// student. These functions save and fetch those recaps in the "Lesson Recaps" tab.
 /**
  * Returns the recap for one specific lesson, or `null` if none exists.
  * Read-only — never touches the schema. Lesson Recaps tab missing is
  * a clean null return rather than an error so the UI can render an
  * empty state without a server roundtrip first.
  */
+// handleGetLessonRecap fetches the teacher's recap for one lesson, identified by the student's
+// email, lesson date, and start time. It gives back the recap, or "none" if it hasn't been
+// written yet. It only reads; it never changes the Sheet.
 function handleGetLessonRecap(payload) {
+  // Read the three identifying details, then look for a matching recap row.
   var key = parseRecapKey(payload);
   var existing = findRecapRow(key);
   return {
@@ -1710,7 +2023,12 @@ function handleGetLessonRecap(payload) {
  * empty string. Updated At is set server-side (current time in the
  * spreadsheet's TZ).
  */
+// handleSaveLessonRecap saves the teacher's recap for one lesson into the Lesson Recaps tab.
+// The recap has four parts: the greeting, what we did today, the homework, and plans for next
+// class. If a recap for that lesson already exists it is updated; otherwise a new row is added.
+// It gives back the saved recap, including when it was saved.
 function handleSaveLessonRecap(payload) {
+  // Read which lesson this is for and the four parts the teacher wrote. Missing parts are blank.
   var key = parseRecapKey(payload);
   var fields = (payload && payload.fields) || {};
 
@@ -1726,6 +2044,8 @@ function handleSaveLessonRecap(payload) {
   var nameByEmail = getStudentNameMap();
   var studentName = nameByEmail[key.studentEmail] || "";
 
+  // Open the Lesson Recaps tab (creating it the first time) and find each column by its title.
+  // The "+ 1" converts to the Sheet's column numbers, which start at 1.
   var sheet = ensureRecapsSheet();
   var headers = recapHeaders(sheet);
   var emailCol = headerIndex(headers, "Student Email") + 1;
@@ -1738,11 +2058,14 @@ function handleSaveLessonRecap(payload) {
   var nextCol = headerIndex(headers, "Next Class") + 1;
   var updatedCol = headerIndex(headers, "Updated At") + 1;
 
+  // Note the current date and time in the spreadsheet's time zone, as the "Updated At" stamp.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var tz = ss.getSpreadsheetTimeZone();
   var now = new Date();
   var nowIso = Utilities.formatDate(now, tz, "yyyy-MM-dd'T'HH:mm:ssXXX");
 
+  // If a recap for this lesson already exists, reuse its row. If not, start a new row at the
+  // bottom and fill in which student and lesson it belongs to.
   var existing = findRecapRow(key);
   var rowIndex;
   if (existing) {
@@ -1757,6 +2080,7 @@ function handleSaveLessonRecap(payload) {
   // Always refresh the display name from the roster on save — keeps it
   // consistent if a student renamed themselves on the form.
   if (studentName) sheet.getRange(rowIndex, nameCol).setValue(studentName);
+  // Write the four recap parts and the time it was saved, then save the Sheet right away.
   sheet.getRange(rowIndex, greetingCol).setValue(greeting);
   sheet.getRange(rowIndex, todayCol).setValue(todayWe);
   sheet.getRange(rowIndex, homeworkCol).setValue(homework);
@@ -1764,6 +2088,7 @@ function handleSaveLessonRecap(payload) {
   sheet.getRange(rowIndex, updatedCol).setValue(nowIso);
   SpreadsheetApp.flush();
 
+  // Send the saved recap back so the website can show it right away.
   return {
     ok: true,
     recap: {
@@ -1785,12 +2110,16 @@ function handleSaveLessonRecap(payload) {
  * then start time desc (newest first). `[]` when the tab is missing
  * or the student has no recaps yet.
  */
+// handleListRecapsForStudent gives back every recap for one student, newest lesson first.
+// It gives back an empty list if there are none yet.
 function handleListRecapsForStudent(payload) {
+  // Tidy the student's email and stop if it's missing.
   var email = String((payload && payload.studentEmail) || "")
     .trim()
     .toLowerCase();
   if (!email) throw new Error("Missing studentEmail");
 
+  // Read all recaps, keep only this student's, and sort them newest first.
   var recaps = readAllRecaps().filter(function (r) {
     return String(r.studentEmail).toLowerCase() === email;
   });
@@ -1802,6 +2131,8 @@ function handleListRecapsForStudent(payload) {
  * Returns every recap in the system, sorted newest first. Used by
  * the Recaps tab page on the website.
  */
+// handleListRecaps gives back every recap for every student, newest lesson first. It feeds the
+// Recaps page on the website.
 function handleListRecaps(payload) {
   var recaps = readAllRecaps();
   recaps.sort(compareRecapsNewestFirst);
@@ -1812,6 +2143,8 @@ function handleListRecaps(payload) {
 // Phase 5 — helpers
 // ──────────────────────────────────────────────────────────────────────
 
+// parseRecapKey pulls the three details that identify a lesson (student email, lesson date,
+// start time) out of the website's request. It stops with an error if any is missing.
 function parseRecapKey(payload) {
   var studentEmail = String((payload && payload.studentEmail) || "")
     .trim()
@@ -1830,11 +2163,16 @@ function parseRecapKey(payload) {
  * a different column order are left alone — we look up columns by
  * header name, not position.
  */
+// ensureRecapsSheet opens the Lesson Recaps tab, creating it with its column titles the first
+// time a recap is saved. It gives back the tab.
 function ensureRecapsSheet() {
+  // Look for the tab.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(LESSON_RECAPS_SHEET_NAME);
   var freshlyCreated = false;
   if (!sheet) {
+    // Not there: create it, write the column titles in bold, and keep the title row pinned at the
+    // top while scrolling ("frozen").
     sheet = ss.insertSheet(LESSON_RECAPS_SHEET_NAME);
     sheet.getRange(1, 1, 1, LESSON_RECAPS_HEADERS.length)
       .setValues([LESSON_RECAPS_HEADERS])
@@ -1842,12 +2180,14 @@ function ensureRecapsSheet() {
     sheet.setFrozenRows(1);
     freshlyCreated = true;
   } else if (sheet.getLastRow() === 0) {
+    // The tab exists but is completely empty: write the column titles the same way.
     sheet.getRange(1, 1, 1, LESSON_RECAPS_HEADERS.length)
       .setValues([LESSON_RECAPS_HEADERS])
       .setFontWeight("bold");
     sheet.setFrozenRows(1);
     freshlyCreated = true;
   }
+  // If we just set it up, apply the studio's colors. A styling problem never blocks saving.
   if (freshlyCreated) {
     try {
       formatLessonRecapsSheet(sheet);
@@ -1863,11 +2203,15 @@ function ensureRecapsSheet() {
  * headers from LESSON_RECAPS_HEADERS that are missing (so older
  * sheets created before a new column was added still work).
  */
+// recapHeaders reads the Lesson Recaps tab's column titles. If an expected title is missing
+// (for example, a column added in a later version), it adds it at the end. Gives back the titles.
 function recapHeaders(sheet) {
+  // Read the title row and note which titles are present.
   var lastCol = Math.max(sheet.getLastColumn(), 1);
   var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
   var existing = {};
   headers.forEach(function (h) { existing[String(h).trim()] = true; });
+  // Work out which expected titles are missing, and add them to the right of the existing ones.
   var missing = LESSON_RECAPS_HEADERS.filter(function (h) { return !existing[h]; });
   if (missing.length > 0) {
     var startCol = lastCol + 1;
@@ -1885,19 +2229,24 @@ function recapHeaders(sheet) {
  * `null` (not throws) when the tab doesn't exist, which is the
  * pre-first-save state.
  */
+// findRecapRow searches the Lesson Recaps tab for the recap of one lesson (matching email, date,
+// and start time). It gives back the row number and the recap, or nothing if there isn't one.
 function findRecapRow(key) {
+  // Open the tab and read it. No tab, or no rows below the titles, means no recap yet.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(LESSON_RECAPS_SHEET_NAME);
   if (!sheet) return null;
   var data = sheet.getDataRange().getValues();
   if (data.length < 2) return null;
 
+  // Find the three identifying columns by title. If any is missing, there's nothing to match.
   var headers = data[0];
   var emailCol = headerIndex(headers, "Student Email");
   var dateCol = headerIndex(headers, "Lesson Date");
   var startCol = headerIndex(headers, "Start Time");
   if (emailCol === -1 || dateCol === -1 || startCol === -1) return null;
 
+  // Go down each row and stop at the first one where the email, date, and start time all match.
   var ssTz = ss.getSpreadsheetTimeZone();
   for (var r = 1; r < data.length; r++) {
     var rowEmail = String(data[r][emailCol] || "").trim().toLowerCase();
@@ -1919,12 +2268,16 @@ function findRecapRow(key) {
  * Returns `[]` when the tab is missing — which is normal until the
  * teacher saves their first recap.
  */
+// readAllRecaps reads every recap in the Lesson Recaps tab into a list, skipping blank rows.
+// It gives back an empty list if the tab doesn't exist yet.
 function readAllRecaps() {
+  // Open the tab and read it. No tab, or no rows below the titles, means an empty list.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(LESSON_RECAPS_SHEET_NAME);
   if (!sheet) return [];
   var data = sheet.getDataRange().getValues();
   if (data.length < 2) return [];
+  // Turn each row that has a student email into a recap record.
   var headers = data[0];
   var ssTz = ss.getSpreadsheetTimeZone();
   var out = [];
@@ -1937,11 +2290,16 @@ function readAllRecaps() {
   return out;
 }
 
+// recapRowToObject turns one row of the Lesson Recaps tab into a labeled recap record the
+// website understands, with dates and times written the same way everywhere.
 function recapRowToObject(headers, row, ssTz) {
+  // A small helper: given a column title, fetch this row's value in that column (blank if the
+  // column doesn't exist).
   function pick(name) {
     var idx = headerIndex(headers, name);
     return idx === -1 ? "" : row[idx];
   }
+  // Read the date, the start time, and the "last saved" time, and put each in a standard form.
   var dateRaw = pick("Lesson Date");
   var startRaw = pick("Start Time");
   var updatedRaw = pick("Updated At");
@@ -1955,6 +2313,7 @@ function recapRowToObject(headers, row, ssTz) {
     updatedAt = String(updatedRaw || "").trim();
   }
 
+  // Assemble the finished recap record.
   return {
     studentEmail: String(pick("Student Email") || "").trim().toLowerCase(),
     studentName: String(pick("Student Name") || "").trim(),
@@ -1969,11 +2328,15 @@ function recapRowToObject(headers, row, ssTz) {
 }
 
 /** Sort comparator: newer lesson first; if same date, later start first. */
+// compareRecapsNewestFirst decides the order of two recaps when sorting: the later lesson date
+// comes first, and on the same day the later start time comes first.
 function compareRecapsNewestFirst(a, b) {
+  // Compare dates first. Year-month-day text sorts in date order, so a simple comparison works.
   if (a.lessonDate < b.lessonDate) return 1;
   if (a.lessonDate > b.lessonDate) return -1;
   // Same date — compare start times. Wall-clock strings sort poorly;
   // compare via Date objects parsed with parseWallClockTime.
+  // Turn each start time into minutes after midnight, so "2:00 PM" correctly beats "9:00 AM".
   var ah = parseWallClockTime(a.startTime) || { h: 0, m: 0 };
   var bh = parseWallClockTime(b.startTime) || { h: 0, m: 0 };
   var aMin = ah.h * 60 + ah.m;
@@ -1988,13 +2351,20 @@ function compareRecapsNewestFirst(a, b) {
  * Install: Triggers → Add Trigger → onFormSubmit / From spreadsheet /
  * On form submit.
  */
+// onFormSubmit runs automatically every time a student submits the sign-up Google Form (it is
+// set up as a "trigger": an instruction telling Google to run this on each new form answer).
+// It copies the student's answers onto their own tab (named after their email), creating the
+// tab the first time, then creates their personal Drive folder and shares the class folder.
 function onFormSubmit(e) {
+  // Open the spreadsheet and the tab where form answers land, and read its column titles.
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const formSheet = ss.getSheetByName("Form Responses 1");
 
   const headers = formSheet.getRange(1, 1, 1, formSheet.getLastColumn()).getValues()[0];
+  // "e.values" holds the new answers, in the same order as the column titles.
   const responses = e.values;
 
+  // Find the email column. Without it we can't tell whose answers these are, so stop.
   const normalizedHeaders = headers.map(h => String(h).trim().toLowerCase());
   const emailIndex = normalizedHeaders.indexOf("email address");
 
@@ -2002,6 +2372,7 @@ function onFormSubmit(e) {
     throw new Error('Could not find "Email Address" column. Found headers: ' + headers.join(" | "));
   }
 
+  // Read the student's email from their answers. A blank email is an error.
   const email = String(responses[emailIndex] || "").trim().toLowerCase();
 
   if (!email) {
@@ -2017,6 +2388,7 @@ function onFormSubmit(e) {
     ? ""
     : String(responses[nameIndex] || "").trim();
 
+  // Find the student's own tab. If they don't have one yet, create it and copy in the titles.
   let sheet = ss.getSheetByName(email);
   var createdNewTab = false;
 
@@ -2026,8 +2398,10 @@ function onFormSubmit(e) {
     createdNewTab = true;
   }
 
+  // Add this submission as a new row at the bottom of their tab.
   sheet.appendRow(responses);
 
+  // If the tab is brand new, give it the studio's colors.
   if (createdNewTab) {
     try {
       formatStudentTab(sheet);
@@ -2064,12 +2438,17 @@ function onFormSubmit(e) {
  * three are conditions the bulk `sync-class-resources-access` handler
  * also tolerates, so this stays consistent with that flow.
  */
+// grantClassResourcesViewerForStudent lets one new student view the shared Class Resources
+// folder. It's called right after they submit the form. It quietly does nothing if the folder
+// isn't set up, the student already has access, or Google refuses; the Sync button can retry.
 function grantClassResourcesViewerForStudent(studentEmail) {
+  // Tidy the email and look up the saved folder ID. Stop quietly if either is missing.
   var normalized = String(studentEmail || "").trim().toLowerCase();
   if (!normalized) return;
   var folderId = PropertiesService.getScriptProperties()
     .getProperty(CLASS_RESOURCES_FOLDER_ID_PROPERTY_KEY);
   if (!folderId) return; // not configured yet — skip silently
+  // Try to open the folder. If it can't be opened, note it in the log and stop.
   var folder;
   try {
     folder = DriveApp.getFolderById(folderId);
@@ -2105,6 +2484,7 @@ function grantClassResourcesViewerForStudent(studentEmail) {
   } catch (err) {
     // Session.getEffectiveUser is gated by scope on some accounts; safe to ignore.
   }
+  // Give the student permission to view (not change) the folder.
   try {
     folder.addViewer(normalized);
   } catch (err) {
@@ -2133,6 +2513,8 @@ function grantClassResourcesViewerForStudent(studentEmail) {
 // ──────────────────────────────────────────────────────────────────────
 
 /** Pomfret crimson palette — mirrors the dashboard's --accent / surfaces. */
+// SHEET STYLING. The studio's colors used to style the Sheet: crimson title rows with white
+// text, two soft alternating row colors, and a muted gray-brown for columns the website fills in.
 var FMT_HEADER_BG = "#7a142f";
 var FMT_HEADER_TEXT = "#ffffff";
 var FMT_BAND_FIRST = "#fffdfb";
@@ -2146,14 +2528,18 @@ var FMT_AUTO_COLUMN_TEXT = "#574d44";
  * Anything edited in these columns by hand will be overwritten on the
  * next create-event / cancel-event call, hence the warning.
  */
+// The Lesson Schedule columns the website fills in by itself (Status and Calendar Event ID).
+// They get a different look and a warning if someone tries to edit them by hand.
 var AUTO_MANAGED_LESSON_COLUMNS = ["Status", CALENDAR_EVENT_ID_COLUMN];
 
 /** Note shown when the teacher hovers a header cell of an auto column. */
+// The note that pops up when the teacher hovers over the title of one of those columns.
 var AUTO_MANAGED_HEADER_NOTE =
   "Auto-managed by the dashboard. Don't edit by hand: your changes will " +
   "be overwritten the next time the dashboard updates this lesson.";
 
 /** Description used on the warning-only protection (also shown in the dialog). */
+// The message shown in the warning box if someone tries to edit one of those columns.
 var AUTO_MANAGED_PROTECTION_DESCRIPTION =
   "Auto-managed by the Music Studio dashboard. Please don't edit.";
 
@@ -2166,6 +2552,8 @@ var AUTO_MANAGED_PROTECTION_DESCRIPTION =
  *   MUSIC_STUDIO_SPREADSHEET_ID = <id portion of the sheet URL>
  * The id is the segment between `/d/` and `/edit` in the sheet URL.
  */
+// The settings-drawer label for a backup spreadsheet ID, used only if the script can't tell
+// which spreadsheet it belongs to.
 var MUSIC_STUDIO_SPREADSHEET_ID_PROPERTY_KEY = "MUSIC_STUDIO_SPREADSHEET_ID";
 
 /**
@@ -2173,9 +2561,14 @@ var MUSIC_STUDIO_SPREADSHEET_ID_PROPERTY_KEY = "MUSIC_STUDIO_SPREADSHEET_ID";
  * launched. Used by setup-time helpers that may run from the editor
  * before the runtime has an active-spreadsheet context.
  */
+// resolveMusicStudioSpreadsheet finds the studio spreadsheet. Normally the script already knows
+// (it lives inside the Sheet); if not, it opens the Sheet using the backup ID from the settings
+// drawer, or stops with instructions if that isn't set.
 function resolveMusicStudioSpreadsheet() {
+  // Normal case: the script is attached to the Sheet, so use that.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   if (ss) return ss;
+  // Otherwise look up the backup ID; explain how to set it if it's missing.
   var fallbackId = PropertiesService.getScriptProperties()
     .getProperty(MUSIC_STUDIO_SPREADSHEET_ID_PROPERTY_KEY);
   if (!fallbackId) {
@@ -2187,6 +2580,7 @@ function resolveMusicStudioSpreadsheet() {
       "and /edit in the sheet URL)."
     );
   }
+  // Open the spreadsheet by its ID, or explain why that failed.
   try {
     return SpreadsheetApp.openById(fallbackId);
   } catch (err) {
@@ -2204,10 +2598,15 @@ function resolveMusicStudioSpreadsheet() {
  *
  * Idempotent — safe to run repeatedly.
  */
+// setupSheetFormatting is run by hand from the Apps Script editor (not by the website). It styles
+// every tab in the studio spreadsheet with the studio's colors and adds "please don't edit"
+// warnings to the columns the website manages. Running it again is harmless.
 function setupSheetFormatting() {
+  // Open the spreadsheet and start a list of which tabs were styled and which were skipped.
   var ss = resolveMusicStudioSpreadsheet();
   var summary = { formatted: [], skipped: [] };
 
+  // Style the form-answers (roster) tab, if it exists.
   var roster = ss.getSheetByName("Form Responses 1");
   if (roster) {
     formatRosterSheet(roster);
@@ -2216,6 +2615,7 @@ function setupSheetFormatting() {
     summary.skipped.push("Form Responses 1 (not found)");
   }
 
+  // Style the Lesson Schedule tab, including the warnings on the website-managed columns.
   var schedule = ss.getSheetByName(LESSON_SCHEDULE_SHEET_NAME);
   if (schedule) {
     formatLessonScheduleSheet(schedule);
@@ -2224,6 +2624,7 @@ function setupSheetFormatting() {
     summary.skipped.push(LESSON_SCHEDULE_SHEET_NAME + " (not found)");
   }
 
+  // Style the Lesson Recaps tab, if a recap has been saved yet.
   var recaps = ss.getSheetByName(LESSON_RECAPS_SHEET_NAME);
   if (recaps) {
     formatLessonRecapsSheet(recaps);
@@ -2232,6 +2633,8 @@ function setupSheetFormatting() {
     summary.skipped.push(LESSON_RECAPS_SHEET_NAME + " (not created yet)");
   }
 
+  // Style every student's personal tab: the tabs whose names look like an email address.
+  // Any other tabs are left alone.
   var sheets = ss.getSheets();
   for (var i = 0; i < sheets.length; i++) {
     var s = sheets[i];
@@ -2245,6 +2648,7 @@ function setupSheetFormatting() {
     summary.formatted.push(name);
   }
 
+  // Write a summary of what was done to the editor's log, and return it.
   Logger.log("setupSheetFormatting complete.");
   Logger.log("Formatted: " + summary.formatted.join(", "));
   if (summary.skipped.length > 0) {
@@ -2258,7 +2662,10 @@ function setupSheetFormatting() {
  * frozen first row, alternating row banding in the Pomfret palette,
  * and a thin border under the header.
  */
+// applyBaseTableFormat gives one tab the studio's standard look: a bold crimson title row that
+// stays pinned while scrolling, alternating row colors, and sensible column widths.
 function applyBaseTableFormat(sheet) {
+  // Work out how many columns and rows the tab has (at least 1 column and 2 rows).
   var lastCol = Math.max(sheet.getLastColumn(), 1);
   var maxRows = Math.max(sheet.getMaxRows(), 2);
 
@@ -2313,16 +2720,19 @@ function applyBaseTableFormat(sheet) {
 }
 
 /** Format the master roster (Form Responses 1) — base format only. */
+// Style the roster (form answers) tab with the standard look.
 function formatRosterSheet(sheet) {
   applyBaseTableFormat(sheet);
 }
 
 /** Format a per-student tab — base format only. */
+// Style one student's personal tab with the standard look.
 function formatStudentTab(sheet) {
   applyBaseTableFormat(sheet);
 }
 
 /** Format the Lesson Recaps tab — base format only. */
+// Style the Lesson Recaps tab with the standard look.
 function formatLessonRecapsSheet(sheet) {
   applyBaseTableFormat(sheet);
 }
@@ -2336,10 +2746,14 @@ function formatLessonRecapsSheet(sheet) {
  * try). If a column is missing it is silently skipped — the formatting
  * is cosmetic and shouldn't block setup.
  */
+// formatLessonScheduleSheet styles the Lesson Schedule tab with the standard look, then marks
+// the website-managed columns (Status, Calendar Event ID) with muted colors and an edit warning.
 function formatLessonScheduleSheet(sheet) {
+  // Make sure the Calendar Event ID column exists, then apply the standard look.
   ensureCalendarEventIdColumn(sheet);
   applyBaseTableFormat(sheet);
 
+  // Read the column titles, then find and mark each website-managed column.
   var lastCol = Math.max(sheet.getLastColumn(), 1);
   var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
 
@@ -2357,9 +2771,12 @@ function formatLessonScheduleSheet(sheet) {
  * data cells get a muted background + italic font so the teacher
  * immediately sees the column is "different".
  */
+// highlightAutoManagedColumn makes a website-managed column look different: a note on its title
+// and gray-brown italic text below it, so the teacher can see it isn't meant for typing in.
 function highlightAutoManagedColumn(sheet, columnIndex, columnName) {
   var maxRows = Math.max(sheet.getMaxRows(), 2);
 
+  // Attach the hover note to the column's title cell.
   sheet.getRange(1, columnIndex)
     .setNote(AUTO_MANAGED_HEADER_NOTE);
 
@@ -2367,6 +2784,7 @@ function highlightAutoManagedColumn(sheet, columnIndex, columnName) {
   // canonical column name (header lookups use the raw value, so we keep
   // the original text and use a note instead — no value rewrite).
 
+  // Color every cell below the title in muted colors and italics.
   sheet.getRange(2, columnIndex, maxRows - 1, 1)
     .setBackground(FMT_AUTO_COLUMN_BG)
     .setFontColor(FMT_AUTO_COLUMN_TEXT)
@@ -2382,10 +2800,14 @@ function highlightAutoManagedColumn(sheet, columnIndex, columnName) {
  * before adding a fresh one, so re-running setup never stacks up
  * duplicate protections on the same range.
  */
+// protectAutoManagedColumn puts a soft lock on a website-managed column: anyone who edits it
+// sees a warning box first. They can still go ahead, but the website may overwrite the change.
 function protectAutoManagedColumn(sheet, columnIndex) {
+  // Select every cell in the column below the title.
   var maxRows = Math.max(sheet.getMaxRows(), 2);
   var range = sheet.getRange(2, columnIndex, maxRows - 1, 1);
 
+  // Remove any earlier warning this script put on the same column, so they don't pile up.
   var existing = sheet.getProtections(SpreadsheetApp.ProtectionType.RANGE);
   for (var i = 0; i < existing.length; i++) {
     var p = existing[i];
@@ -2397,6 +2819,7 @@ function protectAutoManagedColumn(sheet, columnIndex) {
     }
   }
 
+  // Add a fresh warning-only lock with the standard message.
   range.protect()
     .setDescription(AUTO_MANAGED_PROTECTION_DESCRIPTION)
     .setWarningOnly(true);
