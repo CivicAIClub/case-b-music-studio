@@ -4,7 +4,8 @@
 // Drive by itself, so it sends requests here, and this script does the work and replies.
 // Reading (doGet) hands the website the student roster and lesson schedule from the Sheet.
 // Writing (doPost) books or cancels lessons on Google Calendar, sets up and shares Google Drive
-// folders, and saves the teacher's lesson recaps. Every write must carry a shared password.
+// folders, and saves the teacher's lesson recaps. Every request, read or write, must carry a
+// shared password.
 // onFormSubmit runs whenever a student fills in the sign-up Google Form. The website files that
 // talk to this script are src/api/appsScriptStudent.ts, appsScriptSchedule.ts, appsScriptPost.ts.
 // The long technical note below is for developers; plain-English notes like this run throughout.
@@ -35,6 +36,8 @@
  * ───────────────────────────────────────────────────────────────────────
  * HTTP endpoints (one Web App, routed by query params or POST body)
  * ───────────────────────────────────────────────────────────────────────
+ *  Every GET must include &secret=… (same SHARED_SECRET as POSTs);
+ *  otherwise the reply is { error: "Unauthorized" }.
  *  GET  ?email=foo@bar.com           → latest row from that student's tab
  *  GET  ?action=list                 → { students: [...] }  every roster row
  *  GET  ?action=schedule-list        → { rows: [...] }      all booked lessons
@@ -61,6 +64,9 @@
  *      {"action":"cancel-event",  "secret":"…", studentEmail, lessonDate,
  *       startTime}
  *           → { ok, cancelled: true }
+ *             or { ok, cancelled: false, reason } when the row has no
+ *             Calendar Event ID (nothing changed; the website tells the
+ *             teacher)
  *
  *    Phase 3 — Class Resources (shared Google Drive folder visible to
  *    every enrolled student). The folder ID is set once in Script
@@ -120,6 +126,9 @@
  *  Every POST must include a "secret" field whose value matches the
  *  SHARED_SECRET stored in Script Properties (Project Settings →
  *  Script Properties → Add property: SHARED_SECRET = <random hex>).
+ *  Every GET must include the same value as a "secret" query
+ *  parameter (?action=list&secret=…), because GETs return the roster
+ *  (with student emails) and the schedule.
  *  The frontend reads it from .env.local (VITE_APPS_SCRIPT_SHARED_SECRET).
  *
  *  IMPORTANT: this secret IS bundled into the JS the browser
@@ -163,7 +172,7 @@
 // Config
 // ──────────────────────────────────────────────────────────────────────
 
-/** Property key under which the POST shared secret is stored. */
+/** Property key under which the GET/POST shared secret is stored. */
 // SETTINGS. This section holds fixed settings the rest of the file relies on: tab names, who is
 // invited to every lesson, and who can see the shared folders.
 // "Script Properties" are a private settings box Google keeps for this script, a bit like a
@@ -337,8 +346,17 @@ var LESSON_RECAPS_HEADERS = [
 // never change anything. Google runs this automatically whenever someone opens this script's
 // web address. The website adds a note to the address saying what it wants (for example
 // "?action=list" for the roster). The answer goes back as JSON (a plain-text format for data
-// that both this script and the website understand). Read requests need no password.
+// that both this script and the website understand). Read requests must carry the same shared
+// password as write requests (as "&secret=..." on the address), because they hand out student
+// emails and the lesson schedule.
 function doGet(e) {
+  // Check the shared password before reading anything. If it's missing or wrong, refuse. The
+  // reply uses the same { error: ... } shape the website already shows for failed reads.
+  const params = (e && e.parameter) || {};
+  if (!isValidSecret(params.secret)) {
+    return jsonResponse({ error: "Unauthorized" });
+  }
+
   // Open the studio spreadsheet and read what the website asked for: an "action" word and/or a
   // student's email. Both are tidied up (extra spaces removed, lowercase) so they match reliably.
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2026,8 +2044,33 @@ function handleGetLessonRecap(payload) {
 // handleSaveLessonRecap saves the teacher's recap for one lesson into the Lesson Recaps tab.
 // The recap has four parts: the greeting, what we did today, the homework, and plans for next
 // class. If a recap for that lesson already exists it is updated; otherwise a new row is added.
-// It gives back the saved recap, including when it was saved.
+// It gives back the saved recap, including when it was saved. The real work happens in
+// saveLessonRecapLocked, just below.
 function handleSaveLessonRecap(payload) {
+  // Serialize concurrent saves, the same way handleCreateEvent does. Without this, two saves
+  // for a lesson that has no recap yet (a double-click, or two browser tabs) could both miss
+  // the existing-row lookup below and each append a new row, leaving duplicate recaps.
+  // In plain terms: take the "lock" (the single key to the room) so only one recap save
+  // happens at a time. If someone else holds it for 30 seconds, give up and ask to try again.
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30 * 1000)) {
+    throw new Error(
+      "Another save is in progress for this studio. Please try again in a moment."
+    );
+  }
+  // Save while holding the lock, and always hand the key back afterward, even if something
+  // went wrong.
+  try {
+    return saveLessonRecapLocked(payload);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// saveLessonRecapLocked does the actual saving, and only runs while the lock above is held.
+// It finds the lesson's existing recap row (or adds a new one at the bottom) and writes the
+// four recap parts into it.
+function saveLessonRecapLocked(payload) {
   // Read which lesson this is for and the four parts the teacher wrote. Missing parts are blank.
   var key = parseRecapKey(payload);
   var fields = (payload && payload.fields) || {};
