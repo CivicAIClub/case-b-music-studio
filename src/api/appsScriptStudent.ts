@@ -20,12 +20,26 @@
  * The deployed `/exec` URL lives in `VITE_APPS_SCRIPT_BASE_URL` in
  * `.env.local`. The frontend appends `?action=...` or `?email=...`.
  */
+// In plain English: this file fetches student information for the website. Students fill
+// out a Google Form, and their answers land in the studio's Google Sheet. The Apps Script
+// (a small program Google runs for us, attached to that sheet; code in apps-script/Code.gs)
+// reads the sheet and hands rows back to this website when asked.
+// This file does two jobs: get the whole roster (every student), and get one student's newest
+// answers. Each row is tidied into a student profile by mapSheetStudentResponse.ts, and the
+// Students page and the Dashboard show the results.
+// It also keeps the script's web address, which the other files in src/api borrow.
+// Reading data needs no password; only changes (see appsScriptPost.ts) carry the shared secret.
+// Helpers from other files: one turns a raw sheet row into a tidy profile, and one picks a
+// student's most recent answers when they filled out the form more than once.
 import {
   mapSheetRowToProfile,
   type SheetStudentProfile,
 } from "./mapSheetStudentResponse";
 import { pickLatestProfileFromSubmissions } from "../lib/formSubmissionHistory";
 
+// Read the script's web address from the settings file (.env.local), which is copied into
+// the website when it is built. If it is missing, stop right away with instructions,
+// because nothing on the site can work without it.
 const RAW_BASE_URL = (import.meta.env.VITE_APPS_SCRIPT_BASE_URL ?? "").trim();
 if (!RAW_BASE_URL) {
   throw new Error(
@@ -33,12 +47,19 @@ if (!RAW_BASE_URL) {
       "and paste your Apps Script /exec URL."
   );
 }
+// Share the address so the other data files (schedule, calendar, recaps) use the same one.
 export const APPS_SCRIPT_BASE_URL = RAW_BASE_URL;
 
+// A small safety check: is this value a "record" (a bundle of labeled values, like one
+// spreadsheet row with column names) rather than a list or nothing at all?
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+// Given one reply from the script, find the actual student row inside it.
+// Sometimes the row comes "wrapped" inside a label like "row" or "student". This looks inside
+// each possible wrapper, picks the one with the most columns, and uses it only if it has more
+// columns than the outer reply. Otherwise the reply itself is treated as the row.
 /**
  * Some doGet handlers return { row: { ...sheet columns } } instead of a flat row.
  * If we map the wrapper, every column lookup misses and the profile looks empty.
@@ -51,6 +72,7 @@ function extractSingleStudentRow(json: Record<string, unknown>): Record<string, 
     "data",
     "profile",
   ] as const;
+  // Keep track of the best wrapper found so far and how many columns it has.
   let best: Record<string, unknown> | null = null;
   let bestKeyCount = 0;
   for (const k of wrapperCandidates) {
@@ -62,11 +84,14 @@ function extractSingleStudentRow(json: Record<string, unknown>): Record<string, 
       best = inner;
     }
   }
+  // Only use the wrapper if it clearly holds more information than the outer reply.
   const outerKeys = Object.keys(json).length;
   if (best && bestKeyCount > outerKeys) return best;
   return json;
 }
 
+// Find the list of rows inside the roster reply. The script may send a bare list, or a
+// list tucked under "rows", "students", or "data". Anything else is an error.
 function extractRowArray(json: unknown): unknown[] {
   if (Array.isArray(json)) return json;
   if (isRecord(json)) {
@@ -79,6 +104,8 @@ function extractRowArray(json: unknown): unknown[] {
   );
 }
 
+// What the roster fetch gives back: the newest profile for each student, plus every form
+// submission grouped by student email (so a profile can show a history of past answers).
 export type AllStudentsRosterResult = {
   /** Latest row per email (by form Timestamp / Date when present). */
   students: SheetStudentProfile[];
@@ -86,6 +113,8 @@ export type AllStudentsRosterResult = {
   submissionsByEmail: Record<string, SheetStudentProfile[]>;
 };
 
+// Get every student for the roster. It is given optional request settings (for example,
+// a way to cancel) and gives back the two lists described just above.
 /**
  * Fetches everyone for the student list (Students page + Dashboard count/search).
  * Your Apps Script doGet should handle e.parameter.action === "list".
@@ -93,13 +122,17 @@ export type AllStudentsRosterResult = {
 export async function getAllStudents(
   init?: RequestInit
 ): Promise<AllStudentsRosterResult> {
+  // Build the web address that asks the script: "send me the whole student list."
   const url = `${APPS_SCRIPT_BASE_URL}?action=list`;
 
+  // Ask the script, and wait for its reply.
   const res = await fetch(url, {
     method: "GET",
     ...init,
   });
 
+  // Read the reply as JSON (a plain-text format for structured information). If it can't be
+  // read, the web address is probably wrong or the script sent back an error page.
   const text = await res.text();
   let json: unknown;
   try {
@@ -110,10 +143,12 @@ export async function getAllStudents(
     );
   }
 
+  // The script can reply with an "error" message of its own; pass that along.
   if (isRecord(json) && typeof json.error === "string") {
     throw new Error(json.error);
   }
 
+  // A failing status number (anything not in the 200s) also counts as an error.
   if (!res.ok) {
     throw new Error(
       typeof json === "object" && json !== null && "error" in json
@@ -122,9 +157,13 @@ export async function getAllStudents(
     );
   }
 
+  // Pull out the list of rows, and get ready to sort them into piles by student email.
   const rows = extractRowArray(json);
   const submissionsByEmail: Record<string, SheetStudentProfile[]> = {};
 
+  // Go through each row one at a time: tidy it into a profile, then file it under the
+  // student's email in lowercase, so "Sam@x.com" and "sam@x.com" count as the same person.
+  // Rows with no email are skipped.
   for (const row of rows) {
     if (!isRecord(row)) continue;
     const profile = mapSheetRowToProfile(extractSingleStudentRow(row));
@@ -134,15 +173,19 @@ export async function getAllStudents(
     submissionsByEmail[emailKey].push(profile);
   }
 
+  // For each student, keep only their most recent form answers for the roster list.
   const students: SheetStudentProfile[] = [];
   for (const list of Object.values(submissionsByEmail)) {
     const latest = pickLatestProfileFromSubmissions(list);
     if (latest) students.push(latest);
   }
 
+  // Hand back both the roster and the full history.
   return { students, submissionsByEmail };
 }
 
+// Get the newest answers for one student, looked up by email. Used by the profile panel.
+// It is given the email (and optional request settings) and gives back one student profile.
 /**
  * Fetches the latest saved row for one email (right-hand profile panel).
  * Uses encodeURIComponent so characters like + and @ are safe in the query string.
@@ -153,12 +196,15 @@ export async function getStudentByEmail(
   init?: RequestInit
 ): Promise<SheetStudentProfile> {
   const trimmed = email.trim();
+  // A blank email can't be looked up, so stop early.
   if (!trimmed) {
     throw new Error("Email is required to load a student from the sheet.");
   }
 
+  // Build the web address that asks for this one student, with the email safely encoded.
   const url = `${APPS_SCRIPT_BASE_URL}?email=${encodeURIComponent(trimmed)}`;
 
+  // Ask the script, then read its reply as JSON; complain clearly if it can't be read.
   const res = await fetch(url, {
     method: "GET",
     ...init,
@@ -174,6 +220,7 @@ export async function getStudentByEmail(
     );
   }
 
+  // Stop if the script reported an error or the request failed.
   if (isRecord(json) && typeof json.error === "string") {
     throw new Error(json.error);
   }
@@ -186,9 +233,11 @@ export async function getStudentByEmail(
     );
   }
 
+  // The reply should be one row (a bundle of labeled values), not a list.
   if (!isRecord(json)) {
     throw new Error("Unexpected response: expected a JSON object (one row).");
   }
 
+  // Unwrap the row if needed and tidy it into a student profile.
   return mapSheetRowToProfile(extractSingleStudentRow(json));
 }

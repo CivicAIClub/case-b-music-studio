@@ -8,14 +8,25 @@
  * The matching doGet handler lives in apps-script/Code.gs (HTTP endpoints
  * section at the top of that file).
  */
+// In plain English: this file fetches the lesson schedule. The teacher keeps the schedule
+// in a tab called "Lesson Schedule" in the studio's Google Sheet. The Apps Script (a small
+// program Google runs for us, attached to that sheet; code in apps-script/Code.gs) reads that
+// tab and sends the rows here. This file turns each row into a lesson the website can use,
+// with help from mapLessonScheduleRow.ts. The Dashboard uses the full schedule, and the
+// Students page uses one student's lessons. Reading the schedule needs no password.
+// Borrow the script's web address, the row-tidying helper, and the shape of a "lesson".
 import { APPS_SCRIPT_BASE_URL } from "./appsScriptStudent";
 import { mapScheduleRowToLesson } from "./mapLessonScheduleRow";
 import type { ScheduledLesson } from "../types";
 
+// A small safety check: is this value a "record" (a bundle of labeled values, like one
+// spreadsheet row with column names) rather than a list or nothing at all?
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+// Find the list of rows inside the script's reply. It may be a bare list, or a list tucked
+// under "rows", "students", or "data". Anything else is an error.
 function extractScheduleRowArray(json: unknown): unknown[] {
   if (Array.isArray(json)) return json;
   if (isRecord(json)) {
@@ -28,12 +39,16 @@ function extractScheduleRowArray(json: unknown): unknown[] {
   );
 }
 
+// Turn the script's whole reply into a list of lessons. If the script sent an error
+// message, stop and pass it along. Rows that aren't proper records, or that can't become a
+// lesson (for example, a row with no student email), are quietly skipped.
 function mapScheduleResponse(json: unknown): ScheduledLesson[] {
   if (isRecord(json) && typeof json.error === "string") {
     throw new Error(json.error);
   }
   const rows = extractScheduleRowArray(json);
   const out: ScheduledLesson[] = [];
+  // Go through each row one at a time and keep the ones that make a valid lesson.
   for (const row of rows) {
     if (!isRecord(row)) continue;
     const lesson = mapScheduleRowToLesson(row);
@@ -42,16 +57,22 @@ function mapScheduleResponse(json: unknown): ScheduledLesson[] {
   return out;
 }
 
+// Get every lesson in the schedule, for the Dashboard. It is given optional request
+// settings (for example, a way to cancel) and gives back the list of lessons.
 export async function getScheduleList(
   init?: RequestInit
 ): Promise<ScheduledLesson[]> {
+  // Build the web address that asks: "send me the whole lesson schedule."
   const url = `${APPS_SCRIPT_BASE_URL}?action=schedule-list`;
 
+  // Ask the script, and wait for its reply.
   const res = await fetch(url, {
     method: "GET",
     ...init,
   });
 
+  // Read the reply as JSON (a plain-text format for structured information). If it can't be
+  // read, the web address is probably wrong or the script sent back an error page.
   const text = await res.text();
   let json: unknown;
   try {
@@ -62,10 +83,12 @@ export async function getScheduleList(
     );
   }
 
+  // The script can reply with an "error" message of its own; pass that along.
   if (isRecord(json) && typeof json.error === "string") {
     throw new Error(json.error);
   }
 
+  // A failing status number (anything not in the 200s) also counts as an error.
   if (!res.ok) {
     throw new Error(
       typeof json === "object" && json !== null && "error" in json
@@ -74,25 +97,33 @@ export async function getScheduleList(
     );
   }
 
+  // Turn the rows into lessons and hand them back.
   return mapScheduleResponse(json);
 }
 
+// Get only one student's lessons, looked up by email, for that student's profile panel.
+// It works like the function above, but asks the script for just one student.
 export async function getStudentSchedule(
   email: string,
   init?: RequestInit
 ): Promise<ScheduledLesson[]> {
   const trimmed = email.trim();
+  // A blank email can't be looked up, so stop early.
   if (!trimmed) {
     throw new Error("Email is required to load a student schedule.");
   }
 
+  // Build the web address for this student, with the email safely encoded (characters like
+  // "+" and "@" have special meanings in a web address).
   const url = `${APPS_SCRIPT_BASE_URL}?action=schedule&email=${encodeURIComponent(trimmed)}`;
 
+  // Ask the script, and wait for its reply.
   const res = await fetch(url, {
     method: "GET",
     ...init,
   });
 
+  // Read the reply as JSON; complain clearly if it can't be read.
   const text = await res.text();
   let json: unknown;
   try {
@@ -103,6 +134,7 @@ export async function getStudentSchedule(
     );
   }
 
+  // Stop if the script reported an error or the request failed.
   if (isRecord(json) && typeof json.error === "string") {
     throw new Error(json.error);
   }
@@ -115,5 +147,6 @@ export async function getStudentSchedule(
     );
   }
 
+  // Turn the rows into lessons and hand them back.
   return mapScheduleResponse(json);
 }
