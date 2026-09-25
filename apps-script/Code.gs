@@ -855,7 +855,27 @@ function createEventLocked(payload) {
 // handleCancelEvent takes a lesson off Google Calendar. It is given which lesson (student email,
 // date, start time). It deletes the event, clears the saved event ID, and marks the lesson
 // "Cancelled". The lesson row itself stays in the Sheet.
+// Like booking, it takes the lock first, so a cancel and a booking for the same lesson can't
+// run at the same moment and leave the Sheet and the calendar disagreeing.
 function handleCancelEvent(payload) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30 * 1000)) {
+    throw new Error(
+      "Another schedule change is in progress for this studio. Please try again in a moment."
+    );
+  }
+  // Do the cancel while holding the lock, and always hand the key back afterward.
+  try {
+    return cancelEventLocked(payload);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// cancelEventLocked does the actual cancelling, and only runs while the lock above is held.
+// Because the row is looked up inside the lock, it always sees the Sheet as it is right now,
+// including a booking that finished a moment ago.
+function cancelEventLocked(payload) {
   // Find the lesson row and the columns we may need to update.
   var found = findLessonRowFromPayload(payload);
   var sheet = found.sheet;
@@ -964,12 +984,14 @@ function resolveFolderNameForAuthorize(folderId) {
  * 1-indexed column numbers for the columns we'll write back to.
  *
  * Throws (the message bubbles back to the frontend as `ok:false`)
- * when the sheet is missing, the row isn't found, or the key is bad.
+ * when the sheet is missing, the row isn't found, the key matches more
+ * than one row, or the key is bad.
  */
 // findLessonRowFromPayload finds one lesson in the Lesson Schedule tab. A lesson is identified by
 // three things together: the student's email, the lesson date, and the start time. It gives back
 // the tab, the row number, the row's contents, and which columns hold the event ID and status.
-// If the lesson can't be found, it stops with a message the teacher will see on the website.
+// If the lesson can't be found, or more than one row matches, it stops with a message the teacher
+// will see on the website.
 function findLessonRowFromPayload(payload) {
   // Pull the three identifying details out of the request and tidy them up.
   var studentEmail = String((payload && payload.studentEmail) || "")
@@ -1015,8 +1037,9 @@ function findLessonRowFromPayload(payload) {
 
   // Go down the lessons one by one, looking for the row whose email, date, and start time all
   // match. Dates and times are rewritten in the same style the website uses before comparing.
+  // Every matching row is collected (not just the first), so duplicates can be caught below.
   var ssTz = ss.getSpreadsheetTimeZone();
-  var matchRowIndex = -1;
+  var matchRowIndexes = [];
 
   for (var r = 1; r < data.length; r++) {
     var rowEmail = String(data[r][emailCol] || "").trim().toLowerCase();
@@ -1028,17 +1051,28 @@ function findLessonRowFromPayload(payload) {
     var rowStart = normalizeSheetTime(data[r][startCol], ssTz);
     if (rowStart !== startTime) continue;
 
-    matchRowIndex = r + 1; // sheet rows are 1-indexed
-    break;
+    matchRowIndexes.push(r + 1); // sheet rows are 1-indexed
   }
 
   // No match: tell the teacher which lesson couldn't be found.
-  if (matchRowIndex === -1) {
+  if (matchRowIndexes.length === 0) {
     throw new Error(
       "No matching row in Lesson Schedule for " + studentEmail +
       " on " + lessonDate + " at " + startTime
     );
   }
+
+  // More than one row has the same student, date, and start time. The website has no way to say
+  // which one it means, so rather than guess (and maybe book or cancel the wrong row), stop and
+  // tell the teacher which rows to fix in the Sheet.
+  if (matchRowIndexes.length > 1) {
+    throw new Error(
+      "More than one row in Lesson Schedule matches " + studentEmail + " on " + lessonDate +
+      " at " + startTime + " (rows " + matchRowIndexes.join(", ") + "). " +
+      "Delete or correct the duplicate row, then try again."
+    );
+  }
+  var matchRowIndex = matchRowIndexes[0];
 
   // Found it: send back the row as a labeled record plus where it lives in the Sheet.
   // (Sheet rows and columns count from 1, while the code counts from 0, hence the "+ 1".)
