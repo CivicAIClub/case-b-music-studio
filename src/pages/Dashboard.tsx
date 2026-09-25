@@ -157,13 +157,23 @@ export function Dashboard() {
   // the lesson "Cancelled" on the sheet.
   const handleCancelLesson = useCallback(async (lesson: ScheduledLesson) => {
     try {
-      await cancelCalendarEvent({
+      const result = await cancelCalendarEvent({
         studentEmail: lesson.studentEmail,
         lessonDate: lesson.lessonDate,
         startTime: lesson.startTime,
       });
+      // If the sheet row had no calendar event to delete (for example, the page was out of
+      // date), nothing was changed, so tell the teacher in a pop-up instead of staying silent.
+      if (!result.cancelled) {
+        window.alert(
+          "Nothing was cancelled: " +
+            (result.reason ?? "this lesson has no calendar event on the sheet.") +
+            " The schedule will now refresh."
+        );
+      }
       // Re-fetch the schedule so the row's status flips to "Cancelled" and
-      // it drops out of the Upcoming list.
+      // it drops out of the Upcoming list (or, if nothing was cancelled, so the
+      // page shows what the sheet really says now).
       setScheduleRefreshToken((n) => n + 1);
     } catch (err) {
       // If cancelling failed, show a pop-up message with the reason.

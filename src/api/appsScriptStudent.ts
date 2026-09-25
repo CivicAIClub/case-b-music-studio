@@ -18,7 +18,9 @@
  *    Body: one JSON object (same columns as above).
  *
  * The deployed `/exec` URL lives in `VITE_APPS_SCRIPT_BASE_URL` in
- * `.env.local`. The frontend appends `?action=...` or `?email=...`.
+ * `.env.local`. The frontend appends `?action=...` or `?email=...`, plus
+ * `&secret=...` (the same shared secret POSTs carry; doGet rejects reads
+ * without it).
  */
 // In plain English: this file fetches student information for the website. Students fill
 // out a Google Form, and their answers land in the studio's Google Sheet. The Apps Script
@@ -28,7 +30,8 @@
 // answers. Each row is tidied into a student profile by mapSheetStudentResponse.ts, and the
 // Students page and the Dashboard show the results.
 // It also keeps the script's web address, which the other files in src/api borrow.
-// Reading data needs no password; only changes (see appsScriptPost.ts) carry the shared secret.
+// Reading data needs the same shared secret (password) that changes carry (see
+// appsScriptPost.ts), so the roster's emails aren't open to anyone who finds the script's address.
 // Helpers from other files: one turns a raw sheet row into a tidy profile, and one picks a
 // student's most recent answers when they filled out the form more than once.
 import {
@@ -49,6 +52,20 @@ if (!RAW_BASE_URL) {
 }
 // Share the address so the other data files (schedule, calendar, recaps) use the same one.
 export const APPS_SCRIPT_BASE_URL = RAW_BASE_URL;
+
+// Look up the shared secret (the password that proves a request came from this website).
+// It comes from a settings file (.env.local) and is copied into the website when it is built.
+// If it is missing or blank, stop right away with a message explaining how to fix it.
+// Both the reading files (this one and appsScriptSchedule.ts) and appsScriptPost.ts use it.
+export function readSharedSecret(): string {
+  const value = import.meta.env.VITE_APPS_SCRIPT_SHARED_SECRET;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(
+      "Missing VITE_APPS_SCRIPT_SHARED_SECRET. Add it to .env.local at the repo root (copy .env.example) and restart the dev server."
+    );
+  }
+  return value;
+}
 
 // A small safety check: is this value a "record" (a bundle of labeled values, like one
 // spreadsheet row with column names) rather than a list or nothing at all?
@@ -123,7 +140,8 @@ export async function getAllStudents(
   init?: RequestInit
 ): Promise<AllStudentsRosterResult> {
   // Build the web address that asks the script: "send me the whole student list."
-  const url = `${APPS_SCRIPT_BASE_URL}?action=list`;
+  // The shared secret rides along at the end so the script knows the request is from us.
+  const url = `${APPS_SCRIPT_BASE_URL}?action=list&secret=${encodeURIComponent(readSharedSecret())}`;
 
   // Ask the script, and wait for its reply.
   const res = await fetch(url, {
@@ -202,7 +220,8 @@ export async function getStudentByEmail(
   }
 
   // Build the web address that asks for this one student, with the email safely encoded.
-  const url = `${APPS_SCRIPT_BASE_URL}?email=${encodeURIComponent(trimmed)}`;
+  // The shared secret rides along at the end so the script knows the request is from us.
+  const url = `${APPS_SCRIPT_BASE_URL}?email=${encodeURIComponent(trimmed)}&secret=${encodeURIComponent(readSharedSecret())}`;
 
   // Ask the script, then read its reply as JSON; complain clearly if it can't be read.
   const res = await fetch(url, {

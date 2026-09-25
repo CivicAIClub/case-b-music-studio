@@ -8,7 +8,8 @@
  * POSTs are gated by a shared secret stored in Script Properties on
  * the Apps Script side and in `.env.local` on this side
  * (`VITE_APPS_SCRIPT_SHARED_SECRET`). The secret is intentionally not
- * committed to git.
+ * committed to git. GET reads send the same secret as a `secret` query
+ * parameter (see appsScriptStudent.ts, which also holds `readSharedSecret`).
  *
  * IMPORTANT: this secret is bundled into the deployed JS — anyone
  * who can open the site in DevTools can read it. Treat the deployed
@@ -45,26 +46,14 @@
 // site's web address is kept semi-private rather than shared publicly.
 // Files that send their notes through this one: appsScriptCalendar.ts, appsScriptRecaps.ts,
 // appsScriptResources.ts, and appsScriptStudentResources.ts.
-// Borrow the script's web address from the file that reads student data.
-import { APPS_SCRIPT_BASE_URL } from "./appsScriptStudent";
+// Borrow the script's web address, and the helper that looks up the shared secret, from the
+// file that reads student data (the reading files send the same secret too).
+import { APPS_SCRIPT_BASE_URL, readSharedSecret } from "./appsScriptStudent";
 
 // A small safety check: is this value a "record" (a bundle of labeled values, like one
 // spreadsheet row with column names) rather than a list or nothing at all?
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-// Look up the shared secret (the password that proves a note came from this website).
-// It comes from a settings file (.env.local) and is copied into the website when it is built.
-// If it is missing or blank, stop right away with a message explaining how to fix it.
-function readSharedSecret(): string {
-  const value = import.meta.env.VITE_APPS_SCRIPT_SHARED_SECRET;
-  if (typeof value !== "string" || !value.trim()) {
-    throw new Error(
-      "Missing VITE_APPS_SCRIPT_SHARED_SECRET. Add it to .env.local at the repo root (copy .env.example) and restart the dev server."
-    );
-  }
-  return value;
 }
 
 // Optional extras a caller can pass along with a note:
