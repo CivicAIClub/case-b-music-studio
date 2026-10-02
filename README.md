@@ -49,7 +49,7 @@ npm run preview   # optional local preview of the build
 
 ### Auth (shared secret)
 
-Every POST to the Apps Script web app must carry a `secret` field that matches the `SHARED_SECRET` Script Property. Reads (`GET`) are open. Environment variables the frontend needs (both in `.env.local`, documented in `.env.example`):
+Every POST to the Apps Script web app must carry a `secret` field that matches the `SHARED_SECRET` Script Property. Reads (`GET`: roster with student emails, schedule) must carry the same value as a `secret` query parameter (`?action=list&secret=…`); without it `doGet` replies `{ "error": "Unauthorized" }`. Environment variables the frontend needs (both in `.env.local`, documented in `.env.example`):
 
 | Variable | What it is |
 |---|---|
@@ -69,6 +69,8 @@ Vite inlines both values into the built JS, so anyone who opens the deployed sit
 2. Copy the `/exec` URL into `.env.local` → `VITE_APPS_SCRIPT_BASE_URL=<the /exec URL>`.
 
 After any change to `apps-script/Code.gs`, **redeploy a new version** (Manage deployments → ✏️ → New version) so the live URL serves the new code. The `/exec` URL itself stays the same.
+
+**Deploy order for the GET secret check:** deploy the website first (merge to `main` and let the Pages workflow finish), *then* redeploy `Code.gs`. The new site sends `&secret=…` on every GET, which the old `Code.gs` simply ignores, so it keeps working in between. Doing it the other way round leaves the live site unable to load the roster or schedule ("Unauthorized") until the site catches up. Anyone running a local copy needs `VITE_APPS_SCRIPT_SHARED_SECRET` in `.env.local` for reads too.
 
 #### Who gets calendar invites
 

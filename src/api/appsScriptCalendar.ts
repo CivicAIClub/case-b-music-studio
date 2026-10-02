@@ -68,9 +68,12 @@ type CreateResponse = {
   preview?: EventPreview;
 };
 
+// What the script sends back after a cancel request. "cancelled" is false when the lesson row
+// had no Calendar Event ID (nothing was on the calendar to delete); "reason" then says why.
 type CancelResponse = {
   ok: true;
-  cancelled: true;
+  cancelled: boolean;
+  reason?: string;
 };
 
 /** Reads the lesson row and returns the proposed calendar event details. */
@@ -120,16 +123,25 @@ export async function createCalendarEvent(
 /**
  * Cancels and clears the calendar event for this lesson. Sets the
  * row's Status to "Cancelled" so it drops out of Pending and Upcoming.
+ * Resolves with `cancelled: false` (and the server's `reason`) when the
+ * row had no Calendar Event ID, in which case nothing was changed.
  */
+// Ask the script to cancel one lesson. Gives back whether anything was actually cancelled,
+// plus the script's explanation when nothing was, so the page can tell the teacher.
 export async function cancelCalendarEvent(
   key: LessonRowKey,
   init?: AppsScriptPostInit
-): Promise<void> {
-  await postToAppsScript<CancelResponse>(
+): Promise<{ cancelled: boolean; reason: string | null }> {
+  const result = await postToAppsScript<CancelResponse>(
     "cancel-event",
     keyAsPayload(key),
     init
   );
+  // Only an explicit "true" counts as cancelled; anything else means nothing was changed.
+  return {
+    cancelled: result.cancelled === true,
+    reason: typeof result.reason === "string" ? result.reason : null,
+  };
 }
 
 function keyAsPayload(key: LessonRowKey): Record<string, unknown> {

@@ -213,24 +213,60 @@ export function pendingLessonsSorted(
     .sort(compareLessonsByDateTime);
 }
 
-// Make the text used to order two lessons on the same day: the time range if it can be
-// shown, otherwise the lesson block.
-function sortTimeKey(lesson: ScheduledLesson): string {
-  const range = formatLessonTimeRangeForDisplay(lesson);
-  if (range) return range;
-  return lesson.lessonBlock.trim();
+// Turn a time cell (like "9:00 AM", "1:30 PM", or "15:00") into minutes after midnight, so
+// times can be put in real clock order. Gives back nothing (null) if the time can't be read.
+// We can't just sort the words, because as text "10:00 AM" comes before "9:00 AM" (the
+// character "1" comes before "9"), and "1:00 PM" would come before "11:00 AM".
+function timeOfDayMinutes(raw: string): number | null {
+  // Most common case: the time is written like "9:00 AM" or "15:00".
+  const t = raw.trim();
+  const m = /^(\d{1,2}):(\d{2})\s*([AP]M)?$/i.exec(t);
+  if (m) {
+    // Switch to a 24-hour clock: 1 PM becomes 13, and 12 AM (midnight) becomes 0.
+    let hour = Number(m[1]);
+    const period = m[3]?.toUpperCase();
+    if (period === "PM" && hour < 12) hour += 12;
+    else if (period === "AM" && hour === 12) hour = 0;
+    return hour * 60 + Number(m[2]);
+  }
+  // Older versions of the Apps Script send a time as a moment on Dec 30, 1899 (Google Sheets'
+  // "day zero"). Read the clock time from that, the same way formatSheetTimeForDisplay does.
+  if (!t) return null;
+  const d = new Date(t);
+  if (Number.isNaN(d.getTime())) return null;
+  if (d.getFullYear() < 1905 || /1899-12-3[01]/i.test(t)) {
+    return d.getHours() * 60 + d.getMinutes();
+  }
+  return null;
 }
 
-// The rule for putting two lessons in order: earlier date first; on the same date, order by
-// the time text; if still tied, order by student email alphabetically.
+// Put two times of day in order, earliest first. A lesson whose time can't be read goes after
+// lessons whose time is known. Gives back 0 when the two can't be told apart this way.
+function compareTimesOfDay(a: number | null, b: number | null): number {
+  if (a === b) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return a - b;
+}
+
+// The rule for putting two lessons in order: earlier date first; on the same date, earlier
+// start time first (by the real clock, so 9:00 AM comes before 10:00 AM), then earlier end
+// time. Lessons with no readable time come after timed ones that day and are ordered by their
+// lesson block name. If still tied, order by student email alphabetically.
 // A lesson with an unreadable date is treated as coming before all the others.
 export function compareLessonsByDateTime(a: ScheduledLesson, b: ScheduledLesson): number {
   const da = lessonDateTime(a)?.getTime() ?? 0;
   const db = lessonDateTime(b)?.getTime() ?? 0;
   if (da !== db) return da - db;
-  const ta = sortTimeKey(a);
-  const tb = sortTimeKey(b);
-  if (ta !== tb) return ta.localeCompare(tb, undefined, { sensitivity: "base" });
+  // Same day: compare start times, then end times, as minutes after midnight.
+  const byStart = compareTimesOfDay(timeOfDayMinutes(a.startTime), timeOfDayMinutes(b.startTime));
+  if (byStart !== 0) return byStart;
+  const byEnd = compareTimesOfDay(timeOfDayMinutes(a.endTime), timeOfDayMinutes(b.endTime));
+  if (byEnd !== 0) return byEnd;
+  // Still tied (often because neither lesson has a time): order by the block name, like "A Block".
+  const ba = a.lessonBlock.trim();
+  const bb = b.lessonBlock.trim();
+  if (ba !== bb) return ba.localeCompare(bb, undefined, { sensitivity: "base" });
   return a.studentEmail.localeCompare(b.studentEmail, undefined, {
     sensitivity: "base",
   });
