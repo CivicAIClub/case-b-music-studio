@@ -219,7 +219,7 @@
 // Which version of this file is pasted into the Apps Script editor. Change it whenever Code.gs
 // changes. authorize() logs it on its first line and "ping" sends it back, so after a paste you
 // can confirm the live web app is running this exact version.
-var CODE_VERSION = "2026-10-06 phase 6 time sheet";
+var CODE_VERSION = "2026-10-07 google hosting";
 
 /** Property key under which the GET/POST shared secret is stored. */
 // SETTINGS. This section holds fixed settings the rest of the file relies on: tab names, who is
@@ -248,17 +248,14 @@ var CALENDAR_EVENT_ID_COLUMN = "Calendar Event ID";
  * Always invited to every auto-created lesson event. Mr. O'Neal owns
  * the calendar (the deployer of the web app), so he's already on every
  * event as the organizer — but he's listed here too so the dashboard's
- * "Attendees" preview shows him explicitly. Cayden's two emails are
- * here for ongoing maintenance visibility, and Dr. Burns is the
+ * "Attendees" preview shows him explicitly. Dr. Burns is the
  * always-CC'd music department contact.
  */
 // The people added as guests to every lesson the website puts on the calendar, in addition to
 // the student. Change this list to change who is always invited.
 var ALWAYS_INVITE_EMAILS = [
   "roneal@pomfret.org",
-  "rburns@pomfret.org",
-  "caydenauyang@gmail.com",
-  "cauyang.27@pomfret.org"
+  "rburns@pomfret.org"
 ];
 
 /**
@@ -435,26 +432,61 @@ var TIMESHEET_DOUBLE_MINUTES = 90;
 // The question on the sign-up form that says which instrument a student plays.
 var FORM_INSTRUMENT_QUESTION = "What instrument do you want to play?";
 
-// doGet answers "read" requests from the website: requests that only look at information and
-// never change anything. Google runs this automatically whenever someone opens this script's
-// web address. The website adds a note to the address saying what it wants (for example
-// "?action=list" for the roster). The answer goes back as JSON (a plain-text format for data
-// that both this script and the website understand). Read requests must carry the same shared
-// password as write requests (as "&secret=..." on the address), because they hand out student
-// emails and the lesson schedule.
+/**
+ * Google hosting. The website can also be served by this script itself (doGet with nothing on
+ * the address), deployed "Execute as: Me" and "Who has access: Anyone within Pomfret School".
+ * Every request from that page goes through api(), which checks the visitor's Pomfret email
+ * against the ALLOWED_USERS Script Property (comma-separated, capital letters don't matter).
+ */
+// The drawer-slot label for the list of people allowed to use the Google-hosted page.
+var ALLOWED_USERS_PROPERTY_KEY = "ALLOWED_USERS";
+
+// What anyone not on ALLOWED_USERS (or whose email Google won't share) is told.
+var NO_ACCESS_MESSAGE = "You don't have access to the Music Studio. Ask Mr. O'Neal.";
+
+// The HTML file in the Apps Script editor that holds the whole website (built by
+// `npm run build:gas`), and the title shown on the browser tab.
+var PAGE_FILE_NAME = "Index";
+var PAGE_TITLE = "Music Studio";
+
+// doGet runs whenever someone opens this script's web address. Google runs it automatically.
+//   - With no "action" and no "email" on the address, it is a person opening the website
+//     itself (Google hosting): it sends back the Music Studio page (the Index file), but only
+//     to someone on ALLOWED_USERS. Everyone else gets a short "no access" page with no data.
+//   - Otherwise it answers a "read" request from the GitHub Pages website, exactly as before:
+//     the website adds a note to the address saying what it wants (for example "?action=list"
+//     for the roster) plus the shared password ("&secret=..."), and the answer goes back as
+//     JSON (a plain-text format for data). Reads must carry the password because they hand out
+//     student emails and the lesson schedule.
 function doGet(e) {
+  const params = (e && e.parameter) || {};
+  const action = String(params.action || "").trim().toLowerCase();
+  const email = String(params.email || "").trim().toLowerCase();
+
+  // Nothing asked for: show the website itself.
+  if (!action && !email) {
+    return servePage_();
+  }
+
   // Check the shared password before reading anything. If it's missing or wrong, refuse. The
   // reply uses the same { error: ... } shape the website already shows for failed reads.
-  const params = (e && e.parameter) || {};
   if (!isValidSecret_(params.secret)) {
     return jsonResponse_({ error: "Unauthorized" });
   }
+  return jsonResponse_(readRoute_(action, email));
+}
 
-  // Open the studio spreadsheet and read what the website asked for: an "action" word and/or a
-  // student's email. Both are tidied up (extra spaces removed, lowercase) so they match reliably.
+// readRoute_ does the reading for doGet's four kinds of read request, and for the same requests
+// when they come from the Google-hosted page through api(). It is given the "action" word and the
+// student's email (both already lowercase) and gives back the answer as a plain bundle of data:
+//   ""              + email → one student's latest form answers
+//   "list"                  → { students: [...] }  every roster row
+//   "schedule-list"         → { rows: [...] }      every booked lesson
+//   "schedule"      + email → { rows: [...] }      one student's lessons
+// Anything else gets an { error: ... } explaining what may be asked for.
+function readRoute_(action, email) {
+  // Open the studio spreadsheet the script is attached to.
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const action = String(e.parameter.action || "").trim().toLowerCase();
-  const email = String(e.parameter.email || "").trim().toLowerCase();
 
   // 1) One student by email — latest row from that student's per-email tab.
   // Falls back to scanning Form Responses 1 when no per-email tab exists,
@@ -468,24 +500,24 @@ function doGet(e) {
       // Read everything on that tab. If there is nothing below the title row, say so.
       const data = sheet.getDataRange().getValues();
       if (data.length < 2) {
-        return jsonResponse_({ error: "No data found for this student" });
+        return { error: "No data found for this student" };
       }
 
       // Row 1 holds the column titles; the last row is the student's most recent form answers.
       // Pair each answer with its title and send it back.
       const headers = data[0];
       const lastRow = data[data.length - 1];
-      return jsonResponse_(rowToObject_(headers, lastRow));
+      return rowToObject_(headers, lastRow);
     }
 
     // No personal tab? Fall back to the main form-answers tab and search it instead.
     const formSheet = ss.getSheetByName("Form Responses 1");
     if (!formSheet) {
-      return jsonResponse_({ error: "Student not found" });
+      return { error: "Student not found" };
     }
     const formData = formSheet.getDataRange().getValues();
     if (formData.length < 2) {
-      return jsonResponse_({ error: "Student not found" });
+      return { error: "Student not found" };
     }
     // Find which column holds the email addresses. If there is none, give up politely.
     const formHeaders = formData[0];
@@ -493,7 +525,7 @@ function doGet(e) {
       .map((h) => String(h).trim().toLowerCase())
       .indexOf("email address");
     if (emailColIndex === -1) {
-      return jsonResponse_({ error: "Student not found" });
+      return { error: "Student not found" };
     }
     // Go down every row. Each time the email matches, remember that row, so by the end we hold the
     // student's latest submission (lower rows are newer).
@@ -506,9 +538,9 @@ function doGet(e) {
     }
     // If the student never appeared, say so; otherwise send back their latest answers.
     if (!latestRow) {
-      return jsonResponse_({ error: "Student not found" });
+      return { error: "Student not found" };
     }
-    return jsonResponse_(rowToObject_(formHeaders, latestRow));
+    return rowToObject_(formHeaders, latestRow);
   }
 
   // 2) Student roster list — every row from "Form Responses 1".
@@ -516,13 +548,13 @@ function doGet(e) {
     // Open the form-answers tab, where every student sign-up lands.
     const formSheet = ss.getSheetByName("Form Responses 1");
     if (!formSheet) {
-      return jsonResponse_({ error: 'Sheet "Form Responses 1" not found' });
+      return { error: 'Sheet "Form Responses 1" not found' };
     }
 
     // Read the whole tab. If only the title row is there, send back an empty roster.
     const data = formSheet.getDataRange().getValues();
     if (data.length < 2) {
-      return jsonResponse_({ students: [] });
+      return { students: [] };
     }
 
     // Turn each row into a labeled record (column title and answer), and drop any row with no
@@ -534,7 +566,7 @@ function doGet(e) {
       .map((row) => rowToObject_(headers, row))
       .filter((student) => String(student["Email Address"] || "").trim() !== "");
 
-    return jsonResponse_({ students });
+    return { students };
   }
 
   // 3) All scheduled lessons.
@@ -542,13 +574,13 @@ function doGet(e) {
     // Open the Lesson Schedule tab the teacher keeps by hand.
     const sheet = ss.getSheetByName("Lesson Schedule");
     if (!sheet) {
-      return jsonResponse_({ error: "Lesson Schedule sheet not found" });
+      return { error: "Lesson Schedule sheet not found" };
     }
 
     // Read every lesson. If only the title row is there, send back an empty list.
     const data = sheet.getDataRange().getValues();
     if (data.length < 2) {
-      return jsonResponse_({ rows: [] });
+      return { rows: [] };
     }
 
     // Label each lesson row by column title and skip blank rows (rows with no student email).
@@ -557,7 +589,7 @@ function doGet(e) {
       .map((row) => rowToObject_(headers, row))
       .filter((lesson) => String(lesson["Student Email"] || "").trim() !== "");
 
-    return jsonResponse_({ rows });
+    return { rows };
   }
 
   // 4) One student's scheduled lessons.
@@ -565,12 +597,12 @@ function doGet(e) {
     // Same as above, but for just one student.
     const sheet = ss.getSheetByName("Lesson Schedule");
     if (!sheet) {
-      return jsonResponse_({ error: "Lesson Schedule sheet not found" });
+      return { error: "Lesson Schedule sheet not found" };
     }
 
     const data = sheet.getDataRange().getValues();
     if (data.length < 2) {
-      return jsonResponse_({ rows: [] });
+      return { rows: [] };
     }
 
     // Keep only the lessons whose email matches the student asked about.
@@ -581,13 +613,13 @@ function doGet(e) {
         String(lesson["Student Email"] || "").trim().toLowerCase() === email
       );
 
-    return jsonResponse_({ rows });
+    return { rows };
   }
 
   // The request didn't match any of the four kinds above, so explain what the website may ask for.
-  return jsonResponse_({
+  return {
     error: "Missing email or invalid action. Use ?email=student@example.com, ?action=list, ?action=schedule-list, or ?action=schedule&email=student@example.com"
-  });
+  };
 }
 
 /**
@@ -682,53 +714,218 @@ function doPost(e) {
     return jsonResponse_({ ok: false, error: "Missing 'action' in request body" });
   }
 
-  // Hand the request to the matching job. Each "case" below is one job name the website can ask
-  // for, and the function next to it does that job.
+  // Hand the request to the matching job (runPostAction_, below). If a job ran into a problem,
+  // send its message back so the teacher sees what went wrong.
   try {
-    switch (action) {
-      case "ping":
-        return jsonResponse_(handlePing_(payload));
-      case "preview-event":
-        return jsonResponse_(handlePreviewEvent_(payload));
-      case "create-event":
-        return jsonResponse_(handleCreateEvent_(payload));
-      case "cancel-event":
-        return jsonResponse_(handleCancelEvent_(payload));
-      case "list-class-resources":
-        return jsonResponse_(handleListClassResources_(payload));
-      case "sync-class-resources-access":
-        return jsonResponse_(handleSyncClassResourcesAccess_(payload));
-      case "list-student-folder":
-        return jsonResponse_(handleListStudentFolder_(payload));
-      case "ensure-student-folder":
-        return jsonResponse_(handleEnsureStudentFolder_(payload));
-      case "sync-student-folders":
-        return jsonResponse_(handleSyncStudentFolders_(payload));
-      case "get-lesson-recap":
-        return jsonResponse_(handleGetLessonRecap_(payload));
-      case "save-lesson-recap":
-        return jsonResponse_(handleSaveLessonRecap_(payload));
-      case "list-recaps-for-student":
-        return jsonResponse_(handleListRecapsForStudent_(payload));
-      case "list-recaps":
-        return jsonResponse_(handleListRecaps_(payload));
-      case "timesheet-status":
-        return jsonResponse_(handleTimesheetStatus_(payload));
-      case "preview-timesheet-row":
-        return jsonResponse_(handlePreviewTimesheetRow_(payload));
-      case "add-timesheet-row":
-        return jsonResponse_(handleAddTimesheetRow_(payload));
-      case "skip-timesheet-row":
-        return jsonResponse_(handleSkipTimesheetRow_(payload));
-      default:
-        return jsonResponse_({ ok: false, error: "Unknown action: " + action });
-    }
+    return jsonResponse_(runPostAction_(action, payload));
   } catch (err) {
-    // If a job ran into a problem, send its message back so the teacher sees what went wrong.
     return jsonResponse_({
       ok: false,
       error: err && err.message ? err.message : "Action handler threw an unexpected error"
     });
+  }
+}
+
+// runPostAction_ does one "write" job, for doPost (the GitHub Pages website, with the shared
+// password) and for api() (the Google-hosted page, signed in). Each "case" below is one job name
+// the website can ask for, and the function next to it does that job. It gives back that job's
+// answer, or stops with an error the caller turns into { ok: false, error }.
+function runPostAction_(action, payload) {
+  switch (action) {
+    case "ping":
+      return handlePing_(payload);
+    case "preview-event":
+      return handlePreviewEvent_(payload);
+    case "create-event":
+      return handleCreateEvent_(payload);
+    case "cancel-event":
+      return handleCancelEvent_(payload);
+    case "list-class-resources":
+      return handleListClassResources_(payload);
+    case "sync-class-resources-access":
+      return handleSyncClassResourcesAccess_(payload);
+    case "list-student-folder":
+      return handleListStudentFolder_(payload);
+    case "ensure-student-folder":
+      return handleEnsureStudentFolder_(payload);
+    case "sync-student-folders":
+      return handleSyncStudentFolders_(payload);
+    case "get-lesson-recap":
+      return handleGetLessonRecap_(payload);
+    case "save-lesson-recap":
+      return handleSaveLessonRecap_(payload);
+    case "list-recaps-for-student":
+      return handleListRecapsForStudent_(payload);
+    case "list-recaps":
+      return handleListRecaps_(payload);
+    case "timesheet-status":
+      return handleTimesheetStatus_(payload);
+    case "preview-timesheet-row":
+      return handlePreviewTimesheetRow_(payload);
+    case "add-timesheet-row":
+      return handleAddTimesheetRow_(payload);
+    case "skip-timesheet-row":
+      return handleSkipTimesheetRow_(payload);
+    default:
+      return { ok: false, error: "Unknown action: " + action };
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Google hosting: the page and its one way in (api)
+// ──────────────────────────────────────────────────────────────────────
+
+// SAFETY RULE (the same one Case A's AutoPlanner follows): a page served by Apps Script can call
+// ANY function in this file whose name does not end in "_", through google.script.run. So every
+// function here ends in "_" except the few that must be reachable, and each of those checks who
+// is calling:
+//   - api:                        the page's only way in; checks ALLOWED_USERS on every call
+//   - doGet, doPost:              web addresses; reads and writes need the shared password
+//   - authorize,
+//     setupSheetFormatting:       run by a person from the editor (requireEditorRun_)
+//   - onFormSubmit:               only runs from its real form-submit trigger
+// Never add a new function without "_" unless it checks its caller like these do.
+
+/**
+ * The Google-hosted page calls this through google.script.run:
+ *   google.script.run.withSuccessHandler(...).api({ action: "list" })
+ * Read requests: "list", "student" (+ email), "schedule-list", "schedule" (+ email), answered
+ * exactly like the matching GET routes. Every other action is a POST action, answered exactly
+ * like doPost. No shared password on this path: Google has signed the visitor in, and only
+ * people on ALLOWED_USERS get past the first line.
+ */
+// api is the Google-hosted website's one way into this script. It is given a bundle like
+// { action: "list" } or { action: "add-timesheet-row", studentEmail, lessonDate, startTime }.
+// First it checks the signed-in visitor is on ALLOWED_USERS; if not, it answers only with the
+// "no access" message. Otherwise it does the same job the GitHub Pages website's requests do,
+// and gives back the same answer, made safe for google.script.run (no Date objects).
+function api(request) {
+  // Only people on ALLOWED_USERS, checked on every single call.
+  if (!isAllowedUser_(currentUserEmail_())) {
+    return { ok: false, accessDenied: true, error: NO_ACCESS_MESSAGE };
+  }
+
+  var req = request && typeof request === "object" && !Array.isArray(request) ? request : {};
+  var action = String(req.action || "").trim().toLowerCase();
+  var email = String(req.email || "").trim().toLowerCase();
+  var result;
+  try {
+    if (action === "student") {
+      // One student's latest form answers: the GET route with only an email.
+      result = readRoute_("", email);
+    } else if (action === "list" || action === "schedule-list" || action === "schedule") {
+      result = readRoute_(action, email);
+    } else if (!action) {
+      result = { ok: false, error: "Missing 'action' in request" };
+    } else {
+      result = runPostAction_(action, req);
+    }
+  } catch (err) {
+    result = {
+      ok: false,
+      error: err && err.message ? err.message : "Action handler threw an unexpected error"
+    };
+  }
+  // google.script.run can't carry Date objects. Turning the answer into JSON text and back
+  // changes every Date into the same text the GET routes send (and drops empty values), so both
+  // websites see exactly the same data.
+  return JSON.parse(JSON.stringify(result));
+}
+
+// servePage_ sends back the website itself (the Index HTML file) to someone on ALLOWED_USERS,
+// with the "Music Studio" title and the tag that makes it fit phone screens. Anyone else gets a
+// short page that says they don't have access, with no data in it.
+function servePage_() {
+  var email = currentUserEmail_();
+  if (!isAllowedUser_(email)) return notAuthorizedPage_(email);
+  try {
+    return HtmlService.createHtmlOutputFromFile(PAGE_FILE_NAME)
+      .setTitle(PAGE_TITLE)
+      .addMetaTag("viewport", "width=device-width, initial-scale=1");
+  } catch (err) {
+    // The Index file hasn't been pasted into the editor yet (or has another name).
+    return HtmlService.createHtmlOutput(
+      "<p>The Music Studio page file is missing. In the Apps Script editor, add an HTML file " +
+      "named <b>" + PAGE_FILE_NAME + "</b> (from <code>scripts/copy-to-apps-script.sh page</code>), " +
+      "save, and deploy a new version.</p>"
+    ).setTitle(PAGE_TITLE);
+  }
+}
+
+// notAuthorizedPage_ is the page for anyone not on ALLOWED_USERS: the "no access" message and
+// which Google account they are signed in with. It shows no data and offers no buttons.
+function notAuthorizedPage_(email) {
+  var who = email
+    ? '<p class="who">Signed in as <strong>' + escapeHtml_(email) + "</strong></p>"
+    : '<p class="who">Google didn\'t tell the Music Studio which account you are signed in with.</p>';
+  var html =
+    '<!DOCTYPE html><html lang="en"><head><base target="_top"><meta charset="UTF-8">' +
+    "<style>" +
+    "body{margin:0;background:#f6f1ec;color:#1a1411;font-family:Inter,system-ui,-apple-system," +
+    '"Segoe UI",Roboto,Helvetica,Arial,sans-serif}' +
+    'header{background:#7a142f;color:#fff;padding:18px 24px;font-family:"Crimson Pro",Georgia,serif;' +
+    "font-size:22px;font-weight:600}" +
+    "main{max-width:560px;margin:48px auto;padding:0 24px}" +
+    'h1{font-family:"Crimson Pro",Georgia,serif;font-size:30px;margin:0 0 12px}' +
+    "p{line-height:1.5;margin:0 0 12px}.who{color:#6b6157;font-size:14px}" +
+    "</style></head><body>" +
+    "<header>Pomfret School · Music Studio</header>" +
+    "<main><h1>No access</h1><p>" + escapeHtml_(NO_ACCESS_MESSAGE) + "</p>" + who +
+    '<p class="who">Signed in to more than one Google account? Open the Music Studio in a ' +
+    "browser window signed in only to your Pomfret account.</p></main></body></html>";
+  return HtmlService.createHtmlOutput(html)
+    .setTitle(PAGE_TITLE)
+    .addMetaTag("viewport", "width=device-width, initial-scale=1");
+}
+
+// escapeHtml_ makes text safe to put inside a page (so an email can't be read as HTML).
+function escapeHtml_(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// currentUserEmail_ gives the email of the person using the page right now (lowercase), or ""
+// if Google won't say. With "Execute as: Me" and "Anyone within Pomfret School", Google shares
+// the visitor's Pomfret email with the script.
+function currentUserEmail_() {
+  var email = "";
+  try {
+    email = Session.getActiveUser().getEmail();
+  } catch (err) {
+    email = "";
+  }
+  return String(email || "").trim().toLowerCase();
+}
+
+// allowedUsers_ reads ALLOWED_USERS from the settings drawer: a comma-separated list of emails,
+// tidied to lowercase with blanks removed.
+function allowedUsers_() {
+  var raw = PropertiesService.getScriptProperties().getProperty(ALLOWED_USERS_PROPERTY_KEY);
+  return String(raw || "")
+    .split(",")
+    .map(function (s) { return s.trim().toLowerCase(); })
+    .filter(function (s) { return s !== ""; });
+}
+
+// isAllowedUser_ says whether an email is on ALLOWED_USERS. A blank email never is.
+function isAllowedUser_(email) {
+  var clean = String(email || "").trim().toLowerCase();
+  return clean !== "" && allowedUsers_().indexOf(clean) !== -1;
+}
+
+// requireEditorRun_ stops a setup function (authorize, setupSheetFormatting) unless a person is
+// running it from the Apps Script editor: then the person using it and the account it runs as
+// are the same. A visitor of the web page calling it through google.script.run is a different
+// person from the account the web app runs as, so they are refused.
+function requireEditorRun_(name) {
+  var active = currentUserEmail_();
+  var effective = effectiveUserEmail_().trim().toLowerCase();
+  if (!active || active !== effective) {
+    throw new Error(name + " can only be run from the Apps Script editor.");
   }
 }
 
@@ -1020,8 +1217,15 @@ function cancelEventLocked_(payload) {
 // each Google service once so all the permission pop-ups appear together, and writes a short
 // report to the log showing whether each piece is set up correctly.
 function authorize() {
+  // Only a person running it from the editor (see the SAFETY RULE above api).
+  requireEditorRun_("authorize");
+
   // First line of the log: which version of this file is running, so a paste can be confirmed.
   Logger.log("Code version: " + CODE_VERSION);
+  // Second line: which Google account this run uses. A web app deployed with "Execute as: Me"
+  // runs as the account that deployed it.
+  var runsAs = effectiveUserEmail_();
+  Logger.log("Runs as:                  " + (runsAs || "(Google didn't say)"));
 
   // Touch each service so Apps Script knows it must request the
   // corresponding OAuth scope. Logger output is purely informational.
@@ -1050,6 +1254,16 @@ function authorize() {
   Logger.log("Class Resources:          " + classResourcesName);
   Logger.log("Student Resources parent: " + studentResourcesParentName);
 
+  // Google hosting: who may use the Google-hosted page.
+  var allowed = allowedUsers_();
+  Logger.log(
+    allowed.length > 0
+      ? "OK " + ALLOWED_USERS_PROPERTY_KEY + ": " + allowed.length +
+        (allowed.length === 1 ? " person: " : " people: ") + allowed.join(", ")
+      : "PROBLEM " + ALLOWED_USERS_PROPERTY_KEY + ": empty, so nobody can use the Google-hosted " +
+        "page. Add Pomfret emails, separated by commas, in Project Settings → Script Properties."
+  );
+
   // Phase 6: open the time sheet too (so the permission prompt covers it) and report, in plain
   // words, whether both time sheet settings are ready. A problem here never stops authorize().
   var timesheet = checkTimesheetForAuthorize_();
@@ -1064,6 +1278,8 @@ function authorize() {
   return {
     ok: true,
     codeVersion: CODE_VERSION,
+    runsAs: runsAs,
+    allowedUsers: allowed,
     spreadsheet: ssName,
     calendar: calName,
     driveRoot: rootName,
@@ -3926,6 +4142,13 @@ function effectiveUserEmail_() {
 // It copies the student's answers onto their own tab (named after their email), creating the
 // tab the first time, then creates their personal Drive folder and shares the class folder.
 function onFormSubmit(e) {
+  // Only a real form-submit trigger may run this (see the SAFETY RULE above api). A real event
+  // carries the Sheet range the answers landed in; a web page can't fake one, because
+  // google.script.run can only pass plain data, never a working Range.
+  if (!e || !e.range || typeof e.range.getRow !== "function") {
+    throw new Error("onFormSubmit only runs from its form-submit trigger (Triggers → On form submit).");
+  }
+
   // Open the spreadsheet and the tab where form answers land, and read its column titles.
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const formSheet = ss.getSheetByName("Form Responses 1");
@@ -4172,6 +4395,9 @@ function resolveMusicStudioSpreadsheet_() {
 // every tab in the studio spreadsheet with the studio's colors and adds "please don't edit"
 // warnings to the columns the website manages. Running it again is harmless.
 function setupSheetFormatting() {
+  // Only a person running it from the editor (see the SAFETY RULE above api).
+  requireEditorRun_("setupSheetFormatting");
+
   // Open the spreadsheet and start a list of which tabs were styled and which were skipped.
   var ss = resolveMusicStudioSpreadsheet_();
   var summary = { formatted: [], skipped: [] };

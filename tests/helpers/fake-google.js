@@ -162,6 +162,11 @@ export class FakeSheet {
   autoResizeColumn() { return this; }
   getProtections() { return this.protections.slice(); }
   getBandings() { return []; }
+  // Writes a row just below the last row with anything in it (recorded like setValues).
+  appendRow(values) {
+    this.getRange(this.getLastRow() + 1, 1, 1, values.length).setValues([values]);
+    return this;
+  }
 }
 
 export class FakeRange {
@@ -302,12 +307,19 @@ export class FakeRange {
 }
 
 // Builds every fake global Code.gs needs. `spreadsheets` maps an ID to a FakeSpreadsheet;
-// `active` is the studio spreadsheet the script is attached to.
-export function fakeGlobals({ SandboxDate, active, spreadsheets = {}, props = {}, effectiveUser = "script.owner@example.org" }) {
+// `active` is the studio spreadsheet the script is attached to. `effectiveUser` is the account
+// the script runs as; `activeUser` is the person using it (the same person when someone runs a
+// function from the editor; a page visitor otherwise). Change it with setActiveUser().
+// `htmlFiles` lists the HTML files in the Apps Script project (by name).
+export function fakeGlobals({
+  SandboxDate, active, spreadsheets = {}, props = {},
+  effectiveUser = "script.owner@example.org", activeUser, htmlFiles = ["Index"],
+}) {
   const logs = [];
   const openCalls = [];
   const store = Object.assign({}, props);
   let lockHeld = false;
+  let currentActive = activeUser === undefined ? effectiveUser : activeUser;
 
   const SpreadsheetApp = {
     getActiveSpreadsheet: () => active,
@@ -352,7 +364,28 @@ export function fakeGlobals({ SandboxDate, active, spreadsheets = {}, props = {}
   };
 
   const Logger = { log: (...args) => { logs.push(args.map(String).join(" ")); } };
-  const Session = { getEffectiveUser: () => ({ getEmail: () => effectiveUser }) };
+  const Session = {
+    getEffectiveUser: () => ({ getEmail: () => effectiveUser }),
+    getActiveUser: () => ({ getEmail: () => currentActive }),
+  };
+  // HtmlService: an output remembers where it came from, its title and its meta tags.
+  const htmlOutput = (from, content) => {
+    const out = {
+      from, content, title: "", meta: {},
+      setTitle: (t) => { out.title = t; return out; },
+      getTitle: () => out.title,
+      addMetaTag: (name, value) => { out.meta[name] = value; return out; },
+      getContent: () => out.content,
+    };
+    return out;
+  };
+  const HtmlService = {
+    createHtmlOutputFromFile: (name) => {
+      if (!htmlFiles.includes(name)) throw new Error(`No HTML file named ${name} was found.`);
+      return htmlOutput("file:" + name, `<!-- contents of ${name}.html -->`);
+    },
+    createHtmlOutput: (html) => htmlOutput("string", String(html)),
+  };
   const ContentService = {
     MimeType: { JSON: "JSON" },
     createTextOutput: (text) => {
@@ -367,8 +400,9 @@ export function fakeGlobals({ SandboxDate, active, spreadsheets = {}, props = {}
   };
 
   return {
-    globals: { SpreadsheetApp, PropertiesService, LockService, Utilities, Logger, Session, ContentService, CalendarApp, DriveApp },
+    globals: { SpreadsheetApp, PropertiesService, LockService, Utilities, Logger, Session, ContentService, CalendarApp, DriveApp, HtmlService },
     logs,
+    setActiveUser: (email) => { currentActive = email; },
     openCalls,
     props: store,
     isLockHeld: () => lockHeld,

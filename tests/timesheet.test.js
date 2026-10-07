@@ -9,7 +9,7 @@ import {
 } from "./helpers/world.js";
 
 const { avery, jordan, casey, riley, morgan, quinn } = STUDENTS;
-const VERSION = "2026-10-06 phase 6 time sheet";
+const VERSION = "2026-10-07 google hosting";
 const NO_EARLIER_LESSON_1 =
   "No earlier lessons for this student this term, so this is lesson 1. If that's wrong, the name may be spelled differently on the time sheet.";
 
