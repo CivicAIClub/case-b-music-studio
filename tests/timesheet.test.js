@@ -9,7 +9,7 @@ import {
 } from "./helpers/world.js";
 
 const { avery, jordan, casey, riley, morgan, quinn } = STUDENTS;
-const VERSION = "2026-10-07 google hosting";
+const VERSION = "2026-10-07 post-delivery";
 const NO_EARLIER_LESSON_1 =
   "No earlier lessons for this student this term, so this is lesson 1. If that's wrong, the name may be spelled differently on the time sheet.";
 
@@ -179,7 +179,8 @@ test("numbering: a new school year starts over (last year's tab doesn't count)",
   assert.equal(p.tab, "2026-2027");
   assert.equal(p.createsTab, true);
   assert.equal(p.insertBefore, "2025-2026");
-  assert.equal(p.addsTermLabel, true);
+  // A brand-new tab has no term label rows, so it doesn't get one.
+  assert.equal(p.addsTermLabel, false);
   assert.equal(p.termLabel, "Fall 2026");
   assert.deepEqual(p.row, ["10/15/2026", 1, "Avery", "Sample", "Lunch", 0.75, "Guitar"]);
   assert.ok(p.warnings.includes(NO_EARLIER_LESSON_1));
@@ -255,14 +256,14 @@ test("terms and tabs: Fall, Winter and Spring dates map to the right label and s
 
 // ─── Tabs: exact names, CHAPEL tabs, creating a new school-year tab ─────────────────────
 
-test("tabs: a new 2026-2027 tab is made just before 2025-2026, copying header, panes, widths and B/E/F/G dropdowns", () => {
+test("tabs: a new 2026-2027 tab is made just before 2025-2026, copying header, panes, widths and every column's dropdowns", () => {
   const chapel = { name: "2026-2027 (CHAPEL/MISC.)", rows: [[day("2026-09-06"), "Chapel service", "", "", "", 50]] };
   const w = buildWorld({ tabs: [chapel, ...defaultTabs()], lessons: [averyRegular] });
   const r = w.post("add-timesheet-row", keyOf(averyRegular));
   assert.equal(r.ok, true, r.error);
   assert.equal(r.createdTab, true);
-  assert.equal(r.labelRowNumber, 2);
-  assert.equal(r.rowNumber, 3);
+  assert.equal(r.labelRowNumber, null);
+  assert.equal(r.rowNumber, 2);
 
   // Exact names only: the CHAPEL tabs were neither used nor touched.
   assert.deepEqual(w.ts.getSheets().map((s) => s.getName()).slice(0, 4),
@@ -274,7 +275,6 @@ test("tabs: a new 2026-2027 tab is made just before 2025-2026, copying header, p
   const template = w.tab("2025-2026");
   assert.deepEqual(w.shown("2026-2027"), [
     YEAR_HEADERS,
-    ["Fall 2026"],
     ["10/15/2026", 1, "Avery", "Sample", "Lunch", 0.75, "Guitar"],
   ]);
   assert.equal(tab.peek(1, 1).style.fontWeight, "bold");
@@ -282,12 +282,16 @@ test("tabs: a new 2026-2027 tab is made just before 2025-2026, copying header, p
   assert.equal(tab.getFrozenRows(), 1);
   assert.equal(tab.getFrozenColumns(), 2);
   for (let c = 1; c <= 9; c++) assert.equal(tab.getColumnWidth(c), template.getColumnWidth(c));
-  for (const col of [2, 5, 6, 7]) {
-    assert.equal(tab.peek(2, col).rule, template.peek(6, col).rule, "column " + col);
-    assert.equal(tab.peek(1000, col).rule, template.peek(6, col).rule, "column " + col);
+  // Every column's rule from the template's newest lesson row (row 6): B, E, F and G there.
+  for (let col = 1; col <= 9; col++) {
+    const expected = template.peek(6, col)?.rule ?? null;
+    assert.equal(tab.peek(2, col)?.rule ?? null, expected, "column " + col);
+    assert.equal(tab.peek(1000, col)?.rule ?? null, expected, "column " + col);
   }
-  assert.equal(tab.peek(3, 3).rule, null);
-  assert.equal(tab.peek(3, 4).rule, null);
+  assert.notEqual(tab.peek(2, 2).rule, null);
+  assert.equal(tab.peek(3, 3)?.rule ?? null, null);
+  // No lesson row above on a new tab: column A gets the M/d/yyyy date format.
+  assert.equal(tab.peek(2, 1).format, "M/d/yyyy");
 });
 
 test("tabs: a Spring 2026 lesson goes on 2025-2026, never its CHAPEL tab (which comes first)", () => {
@@ -374,16 +378,16 @@ test("names: if C/D dropdowns use the First Name / Last Name tabs, a new name is
   assert.ok(!a.warnings.some((x) => x.includes("First Name list") || x.includes("Last Name list")));
 });
 
-test("hours: no end time or an unusual length is 0.75, with a warning", () => {
+// (Lesson lengths over and under 45 minutes are tested in tests/post-delivery.test.js.)
+test("hours: no end time is 0.75, with a warning, no length line, and a plain Added mark", () => {
   const noEnd = lesson(avery, "2026-10-13", "Lunch", "12:00 PM", "");
-  const hour = lesson(jordan, "2026-10-13", "Lunch", "12:00 PM", "1:00 PM");
-  const w = buildWorld({ tabs: withTab2026(), lessons: [noEnd, hour] });
+  const w = buildWorld({ tabs: withTab2026(), lessons: [noEnd] });
   const a = w.post("preview-timesheet-row", keyOf(noEnd));
   assert.equal(a.row[5], 0.75);
+  assert.equal(a.row[1], 5);
   assert.ok(a.warnings.includes("This lesson has no end time on the Lesson Schedule, so it's counted as a regular lesson (0.75 hours)."));
-  const b = w.post("preview-timesheet-row", keyOf(hour));
-  assert.equal(b.row[5], 0.75);
-  assert.ok(b.warnings.some((x) => x.startsWith("This lesson is 60 minutes long.")));
+  assert.equal(a.lengthLine, null);
+  assert.equal(w.post("add-timesheet-row", keyOf(noEnd)).mark, "Added 10/20/2026");
 });
 
 test("a missing lookup tab is a warning, and its column is left blank", () => {
@@ -561,7 +565,8 @@ test("strict dropdowns: if the year's first row is refused, the new tab stays an
   const ok = w.post("add-timesheet-row", keyOf(averyRegular));
   assert.equal(ok.ok, true, ok.error);
   assert.equal(ok.createdTab, false);
-  assert.equal(ok.labelRowNumber, 2);
+  assert.equal(ok.labelRowNumber, null);
+  assert.equal(ok.rowNumber, 2);
   assert.equal(w.ts.getSheets().filter((s) => s.getName() === "2026-2027").length, 1);
 });
 
@@ -594,7 +599,7 @@ test("skip: a lesson already marked Added keeps its mark", () => {
   assert.equal(w.mark(0), "Added 10/20/2026");
 });
 
-test("H and I are never written, and only school-year tabs are ever changed", () => {
+test("H, I and J are never written, and only school-year tabs are ever changed", () => {
   const winter = lesson(jordan, "2026-12-15", "C Block", "3:00 PM", "4:30 PM");
   const lessons = [averyRegular, averyDouble, winter, lesson(riley, "2026-10-14", "E Block", "9:00 AM", "9:45 AM")];
   const w = buildWorld({ now: "2026-12-20T20:00:00-05:00", lessons });
@@ -612,12 +617,21 @@ test("H and I are never written, and only school-year tabs are ever changed", ()
       assert.ok(x.row >= 2, describe(x));
       assert.ok(x.col === 1 && x.col + x.numCols - 1 <= 7, describe(x));
     }
-    if (x.kind === "copy") assert.equal(x.row, 1);
+    // Copies: the new tab's title row, or a format-only / dropdown-only paste from a lesson
+    // row above on the same tab (never values, never from the title row).
+    if (x.kind === "copy") {
+      if (x.row === 1) {
+        assert.equal(x.from, "2025-2026", describe(x));
+      } else {
+        assert.ok(x.type === "PASTE_FORMAT" || x.type === "PASTE_DATA_VALIDATION", describe(x));
+        assert.equal(x.from, x.sheet, describe(x));
+        assert.ok(x.fromRow >= 2 && x.fromRow < x.row, describe(x));
+      }
+    }
   }
   const tab = w.tab("2026-2027");
   for (let r = 2; r <= tab.getLastRow(); r++) {
-    assert.equal(tab.valueAt(r, 8), "");
-    assert.equal(tab.valueAt(r, 9), "");
+    for (let c = 8; c <= 10; c++) assert.equal(tab.valueAt(r, c), "", `row ${r}, column ${c}`);
   }
 });
 

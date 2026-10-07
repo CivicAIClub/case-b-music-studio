@@ -4,6 +4,8 @@
 // Every name and email here is invented. The time sheet copies the real layout: school-year tabs
 // named like "2025-2026" (newest first), "(CHAPEL/MISC.)" companion tabs, lookup tabs feeding
 // "Reject input" dropdowns on columns B, E, F and G, and hand-typed label rows in column A.
+// newLayoutTab() copies the 2026-2027 tab's layout since the handoff: no label rows, a COMPLETED
+// LESSON checkbox in H, rows filled with a color per pay period, and empty pre-made rows below.
 import { createSandbox, loadCode, zonedMs, formatDate } from "./gas-sandbox.js";
 import { FakeSpreadsheet, FakeRule, fakeGlobals } from "./fake-google.js";
 
@@ -27,6 +29,16 @@ export const LISTS = {
   Instrument: ["Guitar", "Bass", "Ukulele"],
   hours: [0.75, ""],
 };
+
+// The 2026-2027 tab's columns since the handoff (A to J).
+export const NEW_LAYOUT_HEADERS = [
+  "Date", "Lesson No.", "Student First Name", "Student Last Name", "Block",
+  "Total Hours", "Music Subject", "COMPLETED LESSON", "Dir. of Music Sign.", "Paid on paydate",
+];
+
+// Pay-period fill colors on the new-layout tab: real rows, then pre-made rows.
+export const PAY_PERIOD_COLORS = ["#fff2cc", "#d9ead3"];
+export const PREMADE_COLOR = "#cfe2f3";
 
 // Which lookup tab (and how many rows of it) feeds each year-tab column's dropdown.
 const DROPDOWNS = { 2: ["Lesson No.", 12], 5: ["Block", 19], 6: ["hours", 2], 7: ["Instrument", 3] };
@@ -99,6 +111,23 @@ export function tab2026(rows = exampleRows(), extra = {}) {
   return Object.assign({ name: "2026-2027", year: true, rows }, extra);
 }
 
+// Three made-up lessons in the new layout (H: TRUE = ticked, FALSE = not yet).
+export function newLayoutRows() {
+  return [
+    [day("2026-09-10"), 1, "Avery", "Sample", "Lunch", 0.75, "Guitar", true, "ZZ", day("2026-10-15")],
+    [day("2026-09-17"), 2, "Avery", "Sample", "Lunch", 0.75, "Guitar", true],
+    [day("2026-10-01"), 1, "Jordan", "Test", "C", 0.75, "Bass", false],
+  ];
+}
+
+// A 2026-2027 tab in the new layout: the given rows, then `premade` empty rows holding only an
+// unticked checkbox (FALSE in H). The tab ends right after the last pre-made row, so premade: 0
+// makes a tab that ends right after its last real row. Real rows have column A bold and dated
+// "m/d/yyyy", filled with a color per pay period; pre-made rows have their own fill.
+export function newLayoutTab({ rows = newLayoutRows(), premade = 50, name = "2026-2027" } = {}) {
+  return { name, year: true, layout: "checkbox", rows, premade };
+}
+
 function defaultFormRows() {
   const ts = new Date(zonedMs(2026, 8, 20, 9, 0, 0, STUDIO_TZ));
   return Object.values(STUDENTS).map((s) => [ts, s.email, s.name, s.instrument]);
@@ -112,7 +141,7 @@ export function defaultProps() {
   };
 }
 
-const LESSON_HEADERS = [
+export const LESSON_HEADERS = [
   "Student Email", "Student Name", "Lesson Date", "Lesson Block", "Start Time", "End Time",
   "Status", "Lesson Focus", "Note", "Calendar Event ID",
 ];
@@ -134,6 +163,7 @@ export function keyOf(l) {
 //   props               Script Properties (defaults: secret, time sheet URL, start date 2026-09-01)
 //   timesheetTz         the time sheet's time zone (the studio sheet uses STUDIO_TZ)
 //   timeSheetColumn     true to start the Lesson Schedule with a "Time Sheet" column
+//   scheduleHeaders     the Lesson Schedule's column titles in another order (or with extras)
 //   formRows            replaces Form Responses 1's rows
 //   rejectInvalidScriptWrites  true makes "Reject input" dropdowns refuse script writes
 //   activeUser          the person using the script (default: the account it runs as)
@@ -147,14 +177,17 @@ export function buildWorld(options = {}) {
   (options.formRows || defaultFormRows()).forEach((r, i) => form.putRow(i + 2, r));
 
   const schedule = studio.addSheet("Lesson Schedule");
-  const headers = LESSON_HEADERS.concat(options.timeSheetColumn ? ["Time Sheet"] : []);
+  const headers = options.scheduleHeaders || LESSON_HEADERS.concat(options.timeSheetColumn ? ["Time Sheet"] : []);
   schedule.putRow(1, headers);
   (options.lessons || []).forEach((l, i) => {
     const [y, m, d] = l.date.split("-").map(Number);
-    schedule.putRow(i + 2, [
-      l.email, l.name, new Date(zonedMs(y, m, d, 0, 0, 0, STUDIO_TZ)), l.block, l.start, l.end,
-      l.status || "", l.focus || "", "", "",
-    ].concat(options.timeSheetColumn ? [l.mark || ""] : []));
+    const byTitle = {
+      "Student Email": l.email, "Student Name": l.name,
+      "Lesson Date": new Date(zonedMs(y, m, d, 0, 0, 0, STUDIO_TZ)), "Lesson Block": l.block,
+      "Start Time": l.start, "End Time": l.end, Status: l.status || "", "Lesson Focus": l.focus || "",
+      Note: "", "Calendar Event ID": "", "Time Sheet": l.mark || "",
+    };
+    schedule.putRow(i + 2, headers.map((h) => (h in byTitle ? byTitle[h] : "")));
   });
 
   const timesheetTz = options.timesheetTz || STUDIO_TZ;
@@ -227,6 +260,10 @@ function buildTimesheet(ts, tabs, tz) {
       spec.list.forEach((v, i) => { sheet.cell(i + 1, 1).value = v; });
       continue;
     }
+    if (spec.layout === "checkbox") {
+      buildNewLayoutRows(sheet, spec, tz);
+      continue;
+    }
     const header = YEAR_HEADERS.slice();
     if (spec.dateHeader) header[0] = spec.dateHeader;
     sheet.putRow(1, header);
@@ -239,17 +276,47 @@ function buildTimesheet(ts, tabs, tz) {
     spec.rows.forEach((r, i) => sheet.putRow(i + 2, r.map((v) => toCell(v, tz))));
   }
   // Then give each school-year tab its "Reject input" dropdowns on B, E, F and G (and, when
-  // asked, C and D pointing at the First Name / Last Name tabs), on rows 2 to 200.
+  // asked, C and D pointing at the First Name / Last Name tabs), on rows 2 to 200 (on a
+  // new-layout tab: every row, plus the COMPLETED LESSON checkbox in H).
   for (const spec of tabs) {
     if (!spec.year) continue;
     const sheet = ts.getSheetByName(spec.name);
+    const lastRow = spec.layout === "checkbox" ? sheet.getMaxRows() : 200;
     const columns = Object.assign({}, DROPDOWNS, spec.nameDropdowns ? { 3: ["First Name", 3], 4: ["Last Name", 3] } : {});
     for (const [col, [listTab, size]] of Object.entries(columns)) {
       const listSheet = ts.getSheetByName(listTab);
       if (!listSheet) continue; // a test left this lookup tab out
       const rule = new FakeRule({ range: listSheet.getRange(1, 1, size, 1), allowInvalid: false });
-      for (let r = 2; r <= 200; r++) sheet.cell(r, Number(col)).rule = rule;
+      for (let r = 2; r <= lastRow; r++) sheet.cell(r, Number(col)).rule = rule;
     }
+    if (spec.layout === "checkbox") {
+      const checkbox = new FakeRule({ type: "CHECKBOX", allowInvalid: false });
+      for (let r = 2; r <= lastRow; r++) sheet.cell(r, 8).rule = checkbox;
+    }
+  }
+}
+
+// Fills a new-layout tab (see newLayoutTab): header, real rows, pre-made rows, formats.
+function buildNewLayoutRows(sheet, spec, tz) {
+  sheet.maxRows = 1 + spec.rows.length + spec.premade;
+  sheet.putRow(1, NEW_LAYOUT_HEADERS);
+  for (let c = 1; c <= NEW_LAYOUT_HEADERS.length; c++) {
+    Object.assign(sheet.cell(1, c).style, { fontWeight: "bold", background: "#b7b7b7" });
+    sheet.widths[c] = 90 + c * 10;
+  }
+  sheet.frozenRows = 1;
+  spec.rows.forEach((r, i) => {
+    const row = i + 2;
+    sheet.putRow(row, r.map((v) => toCell(v, tz)));
+    const color = PAY_PERIOD_COLORS[Math.min(i >> 1, PAY_PERIOD_COLORS.length - 1)];
+    for (let c = 1; c <= NEW_LAYOUT_HEADERS.length; c++) sheet.cell(row, c).style.background = color;
+    sheet.cell(row, 1).style.fontWeight = "bold";
+    sheet.cell(row, 1).format = "m/d/yyyy";
+  });
+  for (let i = 0; i < spec.premade; i++) {
+    const row = spec.rows.length + 2 + i;
+    sheet.cell(row, 8).value = false;
+    for (let c = 1; c <= NEW_LAYOUT_HEADERS.length; c++) sheet.cell(row, c).style.background = PREMADE_COLOR;
   }
 }
 
@@ -259,7 +326,7 @@ export function shownRows(sheet, tz) {
   const out = [];
   for (let r = 1; r <= last; r++) {
     const line = [];
-    for (let c = 1; c <= 9; c++) {
+    for (let c = 1; c <= 10; c++) {
       const v = sheet.valueAt(r, c);
       line.push(v instanceof Date ? formatDate(v, tz, "M/d/yyyy") : v);
     }

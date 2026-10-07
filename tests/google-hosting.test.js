@@ -58,7 +58,7 @@ test("api accepts listed emails whatever their capital letters, on either side",
   const w = buildGetRoutesWorld({ props: withAllowed(" Teacher.Example@Example.ORG ,second.person@example.org"), activeUser: "TEACHER.example@example.org" });
   const r = w.api({ action: "ping" });
   assert.equal(r.ok, true);
-  assert.equal(r.codeVersion, "2026-10-07 google hosting");
+  assert.equal(r.codeVersion, "2026-10-07 post-delivery");
   assert.equal(w.api({ action: "ping" }, "Second.Person@example.org").ok, true);
 });
 
@@ -184,7 +184,7 @@ test("onFormSubmit refuses anything but a real trigger event, and still works fr
 test("authorize logs who the script runs as and ALLOWED_USERS, with a PROBLEM line when empty", () => {
   const w = buildGetRoutesWorld({ props: withAllowed("Teacher.Example@example.org, second.person@example.org") });
   w.ctx.authorize();
-  assert.equal(w.logs[0], "Code version: 2026-10-07 google hosting");
+  assert.equal(w.logs[0], "Code version: 2026-10-07 post-delivery");
   assert.equal(w.logs[1], "Runs as:                  script.owner@example.org");
   assert.ok(w.logs.includes("OK ALLOWED_USERS: 2 people: teacher.example@example.org, second.person@example.org"), w.logs.join("\n"));
 

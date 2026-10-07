@@ -1777,6 +1777,13 @@ a:hover {
   font-size: 0.8rem;
 }
 
+.timesheet-form__length {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
 .timesheet-warnings {
   padding: var(--space-3) var(--space-4);
   background: var(--status-warning-soft);

@@ -1,14 +1,12 @@
 // AppLayout.tsx: the frame around every page: the school header, the navigation buttons, and
-// the page itself underneath. On the Pomfret-only Google link, if the Apps Script says this
-// visitor isn't on its list of allowed people, the frame shows that message instead of the page.
+// the page itself underneath. The header's link pills (Lesson Schedule, Time sheet, Form, Edit
+// form) come from src/lib/externalLinks.ts. On the Pomfret-only Google link, if the Apps Script
+// says this visitor isn't on its list of allowed people, the frame shows that message instead of
+// the page.
 import { NavLink, Outlet } from "react-router-dom";
 import { SchoolBrandMark } from "./SchoolBrandMark";
 import { useAccessDeniedMessage } from "../lib/accessDenied";
-import {
-  EXTERNAL_LINKS,
-  EXTERNAL_LINK_ORDER,
-  EXTERNAL_LINK_SHORT_LABEL,
-} from "../lib/externalLinks";
+import { EXTERNAL_LINK_EMOJI, useExternalLinks } from "../lib/externalLinks";
 
 function navPillClassName({ isActive }: { isActive: boolean }) {
   return isActive ? "nav-pill nav-pill--active" : "nav-pill";
@@ -17,6 +15,8 @@ function navPillClassName({ isActive }: { isActive: boolean }) {
 export function AppLayout() {
   // Set once the script answers "you don't have access" (see src/lib/accessDenied.ts).
   const accessDenied = useAccessDeniedMessage();
+  // The header's link pills; the two spreadsheet links appear once the script has sent them.
+  const links = useExternalLinks();
   return (
     <div className="app-shell">
       <a href="#main-content" className="skip-link">
@@ -33,39 +33,35 @@ export function AppLayout() {
           </div>
           <nav className="app-top__nav" aria-label="Main navigation">
             <NavLink to="/" end className={navPillClassName}>
-              <span aria-hidden="true">🎵</span> Dashboard
+              <span aria-hidden="true">🎵</span>&nbsp;Dashboard
             </NavLink>
             <NavLink to="/students" className={navPillClassName}>
-              <span aria-hidden="true">🎸</span> Students
+              <span aria-hidden="true">🎸</span>&nbsp;Students
             </NavLink>
             <NavLink to="/recaps" className={navPillClassName}>
-              <span aria-hidden="true">✏️</span> Recaps
+              <span aria-hidden="true">✏️</span>&nbsp;Recaps
             </NavLink>
             <span
               className="app-top__nav-divider"
               aria-hidden="true"
               role="presentation"
             />
-            {EXTERNAL_LINK_ORDER.map((key) => {
-              const link = EXTERNAL_LINKS[key];
-              const shortLabel = EXTERNAL_LINK_SHORT_LABEL[key];
-              return (
-                <a
-                  key={key}
-                  className="nav-pill nav-pill--external"
-                  href={link.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title={link.label}
-                  aria-label={`${link.label} (opens in a new tab)`}
-                >
-                  {shortLabel}
-                  <span className="nav-pill__external-icon" aria-hidden="true">
-                    ↗
-                  </span>
-                </a>
-              );
-            })}
+            {links.map((link) => (
+              <a
+                key={link.key}
+                className="nav-pill nav-pill--external"
+                href={link.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={link.label}
+                aria-label={`${link.label} (opens in a new tab)`}
+              >
+                <span aria-hidden="true">{EXTERNAL_LINK_EMOJI[link.key]}</span>&nbsp;{link.shortLabel}
+                <span className="nav-pill__external-icon" aria-hidden="true">
+                  ↗
+                </span>
+              </a>
+            ))}
           </nav>
         </div>
       </header>

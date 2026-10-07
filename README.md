@@ -51,6 +51,8 @@ npm run build:gas # the Google-hosted page: one file, dist-gas/Index.html (see H
 
 ### Auth (shared secret)
 
+> **Since the Oct 7 handoff this path is switched off in production.** The old public deployment was archived, and the `SHARED_SECRET` and `OAUTH_CLIENT_ID` Script Properties were deleted. So the secret-checked routes (GETs with `&secret=`, every `doPost`) refuse every request, and `npm run dev` can't reach the live script. For live checks, use the Apps Script editor's **test deployment** (**Deploy → Test deployments**, the link ending in `/dev`): it serves the newest saved `Code.gs` and `Index` to editors of the script who are on `ALLOWED_USERS`. The secret-route code stays, in case a public deployment is ever needed again. The rest of this section describes how that path works.
+
 Every POST to the Apps Script web app must carry a `secret` field that matches the `SHARED_SECRET` Script Property. Reads (`GET`: roster with student emails, schedule) must carry the same value as a `secret` query parameter (`?action=list&secret=…`); without it `doGet` replies `{ "error": "Unauthorized" }`. Environment variables the frontend needs (both in `.env.local`, documented in `.env.example`):
 
 | Variable | What it is |
@@ -60,9 +62,11 @@ Every POST to the Apps Script web app must carry a `secret` field that matches t
 
 Vite inlines both values into the built JS, so anyone who opens the deployed site in DevTools can read the secret. That is the documented model for this single-teacher tool: treat the deployed URL as private and don't link it publicly. If the site ever needs to be public, move the secret behind a server-side proxy.
 
-> Pomfret sign-in now comes from **[Hosting on Google](#hosting-on-google-pomfret-sign-in-only)**: the same site served by Apps Script, checked against the `ALLOWED_USERS` Script Property, with no shared secret in the page. The older Google Sign-In design (ID tokens checked against an `ALLOWED_USER_EMAILS` list) was never built; nothing reads `VITE_GOOGLE_OAUTH_CLIENT_ID` or `OAUTH_CLIENT_ID`.
+> Pomfret sign-in comes from **[Hosting on Google](#hosting-on-google-pomfret-sign-in-only)**: the same site served by Apps Script, checked against the `ALLOWED_USERS` Script Property, with no shared secret in the page. The older Google Sign-In design (ID tokens checked against an `ALLOWED_USER_EMAILS` list) was never built; nothing reads `VITE_GOOGLE_OAUTH_CLIENT_ID` or `OAUTH_CLIENT_ID` (deleted from Script Properties at the handoff).
 
 #### One-time `/exec` URL setup
+
+*(How the old public deployment was set up. It was archived at the handoff.)*
 
 1. Apps Script editor → **Deploy → New deployment** (or Manage deployments → New version).
    - Type: Web app
@@ -81,6 +85,14 @@ After any change to `apps-script/Code.gs`, **redeploy a new version** (Manage de
 #### Sheet formatting (one-time)
 
 After updating Code.gs in the editor, select `setupSheetFormatting` from the function dropdown and click ▶ Run. This styles every tab (Form Responses 1, Lesson Schedule, Lesson Recaps, all per-student tabs) with the Pomfret palette and applies warning-only protection to the auto-managed `Status`, `Calendar Event ID` and `Time Sheet` columns (adding the last two if they're missing). Idempotent — safe to re-run.
+
+It also gives three Lesson Schedule columns a dropdown, from row 2 to the bottom. Columns are found by their titles, never by position:
+
+- **Student Email:** every student's email from the roster (*Form Responses 1*), once each, A to Z.
+- **Student Name:** every student's name from the roster, once each, A to Z.
+- **Lesson Block:** the time sheet's `Block` list, with the same items, order and spelling (`1PM  Shadow Block` keeps its two spaces). If the time sheet can't be opened, a built-in copy of that list is used and the log says why.
+
+All three show the list but only warn about anything else typed in; nothing is refused. Rules on every other column (like the existing `Lesson Date` one) are left alone. The log ends with a line like `Lesson Schedule dropdowns (anything else typed in gets a warning, never refused): Student Email: 12 emails; Student Name: 12 names; Lesson Block: 19 blocks from the time sheet`. Each form sign-up (`onFormSubmit`) refreshes the email and name lists; run `setupSheetFormatting` again if the time sheet's Block list changes.
 
 ### Phase 2 — Calendar event creation
 
@@ -191,43 +203,48 @@ Composite key `(Student Email, Lesson Date, Start Time)` — same as Phase 2's c
 
 ### Phase 6 — Time sheet (payroll)
 
-Mr. O'Neal is paid per private lesson and logs every lesson in a payroll time sheet: a separate Google Sheet that the music director signs off and the business office pays from. The Dashboard's **Time sheet** card (right after Pending lessons) lists every lesson that has ended since the start date, isn't Cancelled, and isn't on the time sheet yet, oldest first. **Preview** shows the exact row that will be added (with dropdowns for Lesson No., Block, Total Hours and Music Subject, text boxes for the names, and warnings in plain words); **Add to time sheet** appends it and says "Added to 2026-2027, row N". **Skip** (after a confirm) marks a lesson that didn't happen or was already typed in by hand. **Open time sheet** links to the sheet; its address reaches the browser only at runtime, from `timesheet-status`.
+Mr. O'Neal is paid per private lesson and logs every lesson in a payroll time sheet: a separate Google Sheet that the music director signs off and the business office pays from. Since the handoff, the tool writes to **Mr. O'Neal's own copy** of the time sheet (the "Code Version" copy); `TIMESHEET_SPREADSHEET_ID` points at it. The Dashboard's **Time sheet** card (right after Pending lessons) lists every lesson that has ended since the start date, isn't Cancelled, and isn't on the time sheet yet, oldest first. **Preview** shows the exact row that will be added (with dropdowns for Lesson No., Block, Total Hours and Music Subject, text boxes for the names, and warnings in plain words); **Add to time sheet** appends it and says "Added to 2026-2027, row N". **Skip** (after a confirm) marks a lesson that didn't happen or was already typed in by hand. **Open time sheet** links to the sheet; its address reaches the browser only at runtime, from `timesheet-status`.
+
+**The `2026-2027` tab's layout** (row 1, columns A to J): `Date` | `Lesson No.` | `Student First Name` | `Student Last Name` | `Block` | `Total Hours` | `Music Subject` | `COMPLETED LESSON` (H, a checkbox he ticks) | `Dir. of Music Sign.` (I) | `Paid on paydate` (J). It has no term label rows; rows are filled with a color per pay period, column A is bold, and B, E, F and G have strict ("Reject input") dropdowns. He keeps empty rows ready below the last lesson, each holding only an unticked checkbox. Older tabs (`2025-2026` and before) have no checkbox column, so their H and I are the signature and the pay date.
 
 **What the script writes, and what it never touches**
 
-- It appends one row per lesson directly below the last used row of the school-year tab (`2026-2027` holds August 2026 to July 2027), columns **A to G only**: the date (a real date, shown M/d/yyyy), Lesson No., first name, last name, Block, Total Hours, Music Subject. Values are written as the exact item from the time sheet's lookup lists, with the same type (the number `1`, not the text `"1"`).
-- It never edits or deletes an existing row, never writes column H (Dir. of Music Sign.) or I (Paid on paydate), never touches the `(CHAPEL/MISC.)` tabs, and only *reads* the lookup tabs (`Lesson No.`, `Block`, `hours`, `Instrument`) and the `First Name` / `Last Name` tabs.
-- Year tabs are matched by exact name. If the school year's tab doesn't exist yet, it is created just before the newest year tab, copying that tab's header row, frozen panes, column widths and the B/E/F/G dropdowns.
-- The first lesson of a term gets a label row above it (`Fall 2026`, `Winter 2026-27`, `Spring 2027`), unless a label for that term is already typed below the last lesson. No week or spacer rows.
-- Lesson numbers follow the sheet's own count, per student and per term: a number sets the count, `Double` adds 2, and `No Show`, `Late Cancel` or a blank leave it alone. A 90-minute lesson is `Double` with 1.5 hours; anything else is 0.75. Past the end of the list (lesson 10), the cell is left for him to pick.
-- Each added or skipped lesson gets a note in a new auto-managed **Time Sheet** column on the Lesson Schedule (`Added 10/7/2026` or `Skipped`), which keeps it off the card. If the same date and student are already on the tab, nothing new is appended; only the note is written, so trying again after a failed call is always safe.
+- **Where a row lands:** right below the last row with anything in columns A to G, ignoring every other column. (Google counts a row holding only an unticked checkbox as used; the tool doesn't, so the ready-made rows fill up in order.) If that row exists, its other columns stay as they are; if the tab ends there, a row is added. Either way the row first gets the format (fill color, bold, date format) and the dropdowns and checkbox of the lesson row above it, across every column of the table, never from the title row.
+- It writes **columns A to G only**, in one write: the date (a real date), Lesson No., first name, last name, Block, Total Hours, Music Subject. Values are written as the exact item from the time sheet's lookup lists, with the same type (the number `1`, not the text `"1"`). It never writes H, I or J and never ticks the checkbox. If the landing row already has something past G (a ticked box, a signature), it stops and says which cell to clear, without writing anything.
+- It never edits or deletes an existing row, never touches the `(CHAPEL/MISC.)` tabs, and only *reads* the lookup tabs (`Lesson No.`, `Block`, `hours`, `Instrument`) and the `First Name` / `Last Name` tabs.
+- Year tabs are matched by exact name. If the school year's tab doesn't exist yet, it is created just before the newest year tab, copying that tab's header row, frozen panes, column widths, and every column's dropdown or checkbox (taken from its newest lesson row). No lesson rows are copied.
+- **Term labels follow the tab:** a label row (`Fall 2026`, `Winter 2026-27`, `Spring 2027`) goes above a term's first lesson only on a tab that already has one (text in column A naming Fall, Winter or Spring), and not when a label for that term is already typed below the last lesson. `2026-2027` has none, so it never gets one; neither does a brand-new tab. No week or spacer rows.
+- **Over 45 minutes counts as a double:** 1.5 hours and Lesson No. `Double`. 45 minutes or less is 0.75, and so is a lesson with no end time (with a warning). Other lengths get a warning in the preview: over 45 and not 90 says it counts as a double; under 45 suggests **Skip** if it's make-up time for a double already logged. The real length is never written on the time sheet: the preview shows it on its own line (`70-minute lesson, logged as 1.5 hours (a double).`), and the Lesson Schedule's note keeps it.
+- Lesson numbers follow the sheet's own count, per student and per term: a number sets the count, `Double` adds 2, and `No Show`, `Late Cancel` or a blank leave it alone. Past the end of the list (lesson 10), the cell is left for him to pick.
+- **Saved names:** after each add (not a duplicate), the first name, last name and music subject written are saved for that student in the Script Property `TIMESHEET_STUDENT:<lowercase email>` (JSON). The next preview for that student starts from them, ahead of the sign-up form's name and instrument, and says "Name and subject from your last time sheet row for this student." Values changed in the preview still win, and **Check again** recounts the lesson number for them. If saving fails, the log says so and the add still succeeds.
+- Each added or skipped lesson gets a note in an auto-managed **Time Sheet** column on the Lesson Schedule: `Added 10/7/2026`, `Added 10/7/2026 (70 min, logged as 1.5)` when the lesson wasn't 45 or 90 minutes long, or `Skipped`. Any note keeps the lesson off the card. If the same date and student are already on the tab, nothing new is appended; only the note is written, so trying again after a failed call is always safe.
 
 **One-time setup (in the Apps Script editor)**
 
-1. Share the time sheet as **Editor** with the Google account the web app runs as (Deploy → Manage deployments shows it under "Execute as").
+1. Share the time sheet as **Editor** with the Google account the web app runs as (Deploy → Manage deployments shows it under "Execute as"). Since the handoff that's Mr. O'Neal, and the sheet is his own copy.
 2. Project Settings → Script Properties → Add property:
    - `TIMESHEET_SPREADSHEET_ID` = the time sheet's ID. Pasting its whole URL also works: the script takes the part between `/d/` and the next `/`.
    - `TIMESHEET_START_DATE` = the first lesson date to offer, written like `2026-10-07`. Use the day after the last lesson that was typed in by hand: the tool never offers anything earlier.
 
    Never commit either value. If either is missing, the card says "The time sheet isn't connected yet".
 3. Paste the new `Code.gs` (see below), save, and run `authorize()`. Its first log line is `Code version: …`, followed by `OK TIMESHEET_SPREADSHEET_ID: "<sheet title>", tab 2026-2027` and `OK TIMESHEET_START_DATE: <date>`, or a `PROBLEM …` line saying what to fix.
-4. Run `setupSheetFormatting()` once. It adds the Time Sheet column, grayed out and warning-protected like Calendar Event ID.
-5. Deploy → Manage deployments → ✏️ → Version: **New version** → Deploy. The `/exec` URL stays the same.
+4. Run `setupSheetFormatting()` once. It adds the Time Sheet column, grayed out and warning-protected like Calendar Event ID, and the Lesson Schedule dropdowns.
+5. Mr. O'Neal: Deploy → Manage deployments → ✏️ → Version: **New version** → Deploy. The link stays the same. (Only he deploys; see [`docs/handoff.md`](docs/handoff.md#updates).)
 
-**Deploy order:** paste and deploy `Code.gs` first, then merge the website. The new actions are additive, so the old site keeps working in between.
+**Updating:** `Code.gs` and the page (`Index`) are pasted together, so they always match. The form trigger runs the newly saved `Code.gs` straight away; the site changes only when Mr. O'Neal clicks **New version**.
 
 **Pasting Code.gs:** `scripts/copy-to-apps-script.sh` prints the branch, the last commit, `CODE_VERSION`, the line count and the first 12 characters of the file's SHA-256, then copies `apps-script/Code.gs` to the clipboard (macOS `pbcopy`). Paste it over everything in the editor's `Code.gs`. After deploying, `ping` returns `codeVersion`, so you can confirm which version is live.
 
 | Action | Body fields | Effect |
 |---|---|---|
 | `timesheet-status` | (none beyond `secret`) | Whether the time sheet is connected (and if not, why, in plain words), its link and title, today's school-year tab, the start date, `codeVersion`, and the dropdown lists. Read-only. |
-| `preview-timesheet-row` | `studentEmail`, `lessonDate`, `startTime`, optional `overrides` | The exact A-G row, the tab (and whether it will be created), whether a term label row is added, and warnings. Read-only. |
+| `preview-timesheet-row` | `studentEmail`, `lessonDate`, `startTime`, optional `overrides` | The exact A-G row, the tab (and whether it will be created), whether a term label row is added, warnings, `info` notes, and `lengthLine` (the lesson's real length). Read-only. |
 | `add-timesheet-row` | same + optional `overrides: { lessonNo, firstName, lastName, block, hours, subject }` | Appends the row (or, if it's already there, only marks the lesson). Returns `{ tab, rowNumber, row, alreadyThere }`. |
 | `skip-timesheet-row` | `studentEmail`, `lessonDate`, `startTime` | Marks the lesson `Skipped`. Never touches the time sheet. |
 
-**Strict ("Reject input") dropdowns:** Google's documentation says a rule set to reject input rejects invalid data, but it doesn't say whether that also applies to values a script writes. Double lessons are written as 1.5, which isn't on the `hours` list. If Google ever refuses a row, the preview pop-up shows a plain-English message naming the value, and nothing is added or marked.
+**Strict ("Reject input") dropdowns:** Google's documentation says a rule set to reject input rejects invalid data, but it doesn't say whether that also applies to values a script writes. Doubles (now anything over 45 minutes) are written as 1.5. If 1.5 isn't on the `hours` list and Total Hours rejects other values, Google may refuse the row: the preview pop-up then shows a plain-English message naming the value, and nothing is added or marked. Adding 1.5 to the `hours` tab fixes it.
 
-**Tests:** `npm test` runs `Code.gs` in Node (`node:test` and `node:vm`, no extra packages) against pretend Google Sheets with made-up data: lesson numbering, label rows and text dates, exact tab names, the new-tab path, block and instrument mapping, name splitting, duplicates and retries, the start-date cutoff, and that H and I are never written. CI runs it on every pull request.
+**Tests:** `npm test` runs `Code.gs` in Node (`node:test` and `node:vm`, no extra packages) against pretend Google Sheets with made-up data: lesson numbering, label rows and text dates, exact tab names, the new-tab path, block and instrument mapping, name splitting, duplicates and retries, the start-date cutoff, and that H, I and J are never written. `tests/post-delivery.test.js` covers the landing row (pre-made checkbox rows, a tab that ends at its last lesson, a ticked box in the way), lesson lengths of 30 to 120 minutes and the marks, term labels following the tab, saved names, the Lesson Schedule dropdowns and `studio-links`. CI runs it on every pull request.
 
 ## Hosting on Google (Pomfret sign-in only)
 
@@ -241,9 +258,12 @@ The same website can be served by the Apps Script itself, on a Pomfret-only Goog
 - In the frontend, every request goes through `callAppsScript` in `src/api/appsScriptTransport.ts`: `google.script.run` when it exists, otherwise today's web requests with the secret. So `npm run dev` and the GitHub Pages site keep working.
 - **Safety rule (the same as Case A):** a page served by Apps Script can call *any* top-level function whose name doesn't end in `_`. So every function in `Code.gs` ends in `_` except `api`, `doGet`, `doPost`, `authorize` and `setupSheetFormatting` (these two refuse unless run from the editor) and `onFormSubmit` (refuses anything but a real trigger event). A test fails if another one appears. Keep it that way.
 
+- **Header links:** the **📋 Lesson Schedule** and **🧾 Time sheet** pills (and the Dashboard's *Quick links*) come from the `studio-links` action, fetched once per page load: the studio Sheet's address plus `#gid=` and the Lesson Schedule tab's ID, and the time sheet built from `TIMESHEET_SPREADSHEET_ID` (null when it isn't set, and then the link is hidden). No spreadsheet address is kept in the repo. **📝 Form** and **✏️ Edit form** are fixed links in `src/lib/externalLinks.ts`.
+
 | Script Property | What it is |
 |---|---|
 | `ALLOWED_USERS` | Pomfret emails allowed to use the Google-hosted site, separated by commas (capital letters don't matter). Empty means nobody; `authorize` logs a `PROBLEM` line. |
+| `TIMESHEET_STUDENT:<email>` | Written by the tool: how each student was last written on the time sheet (see Phase 6). Safe to delete; the next add writes it again. |
 
 **Deploying it (or a test copy)**
 
@@ -252,7 +272,7 @@ The same website can be served by the Apps Script itself, on a Pomfret-only Goog
 3. **Deploy → New deployment → Web app**, **Execute as: Me**, **Who has access: Anyone within Pomfret School**. A new deployment gets its own URL. Existing deployments keep running their own version, so the GitHub Pages site is unaffected until its deployment is archived.
 4. After later changes: paste both files again, then **Manage deployments → ✏️** on the Pomfret-only deployment → **New version**.
 
-The handoff archives the old public deployment and deletes `SHARED_SECRET`, which switches off the GitHub Pages site's data. A separate change replaces the Pages site with a "moved" page.
+**Since the handoff (Oct 7, 2026):** the live site is Mr. O'Neal's Pomfret-only deployment. He didn't make a new deployment: he deployed a new version of the existing Pomfret-only test deployment from his own account, so it runs as him and kept its link. Never archive it. **Only he clicks Deploy** (a deploy from another account would make the site run as that account): Cayden pastes both files and saves, then Mr. O'Neal clicks **Deploy → Manage deployments → ✏️ → New version → Deploy** ([`docs/handoff.md`](docs/handoff.md#updates)). The old public deployment was archived and `SHARED_SECRET` and `OAUTH_CLIENT_ID` were deleted, so the GitHub Pages path can't load data, and the Pages site shows a "moved" page.
 
 ## App structure (prototype)
 
@@ -268,13 +288,13 @@ Since the handoff, the app is served by Google with Pomfret sign-in, so GitHub P
 - Branch from `main` as `feature/<short-description>`, `fix/<short-description>`, or `chore/<short-description>` (lowercase, hyphens).
 - Every change goes through a pull request with at least one approval. `main` cannot be pushed to directly.
 - Never commit secrets. `.env.local` is gitignored; `.env.example` holds only placeholders.
-- After changing `apps-script/Code.gs`, bump `CODE_VERSION` near its top, paste it with `scripts/copy-to-apps-script.sh`, and redeploy a **new version** in the Apps Script editor, or the live site keeps running the old code.
+- After changing `apps-script/Code.gs`, bump `CODE_VERSION` near its top and paste it (and the page) with `scripts/copy-to-apps-script.sh code` / `page`. Then Mr. O'Neal deploys a **new version** (only he deploys), or the live site keeps running the old code. Check live changes on the editor's test deployment (`/dev`) first.
 - `npm test` and `npm run build` must both pass before you push (CI runs both).
 - Cursor rules for this project are committed in `.cursor/rules/`. You do not need to paste anything into your IDE settings.
 - The full Git walkthrough for beginners is the club's **[Developer Onboarding Guide](https://github.com/CivicAIClub/docs/blob/main/developer-onboarding.md)**.
 
 ## Status
-🟢 Phases 1–6 shipped: dashboard, inline student profiles, calendar event creation, class and per-student Drive resources, teacher lesson recaps, and the payroll time sheet connection. Pomfret-styled shell, deployed to GitHub Pages, and ready to be served by Google with Pomfret sign-in ([Hosting on Google](#hosting-on-google-pomfret-sign-in-only), [handoff checklist](docs/handoff.md)).
+🟢 Phases 1–6 shipped: dashboard, inline student profiles, calendar event creation, class and per-student Drive resources, teacher lesson recaps, and the payroll time sheet connection. Handed off on Oct 7, 2026: served by Google with Pomfret sign-in from Mr. O'Neal's deployment ([Hosting on Google](#hosting-on-google-pomfret-sign-in-only), [handoff](docs/handoff.md)); GitHub Pages shows a "moved" page. Post-delivery updates: Lesson Schedule dropdowns, doubles over 45 minutes, the landing row for pre-made rows, and the Lesson Schedule and Time sheet links.
 
 ## History
 
