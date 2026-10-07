@@ -4048,6 +4048,10 @@ function appendTimesheetRow_(ctx, plan) {
   // Column A shows the date the way the row above does; without a date format there, M/d/yyyy.
   var dateCell = sheet.getRange(lessonRow, 1);
   if (!isDateFormat_(dateCell.getNumberFormat())) dateCell.setNumberFormat("M/d/yyyy");
+  // Lesson No. (B) and Total Hours (F) always show as plain numbers, whatever format the landing
+  // row had: a date format there once showed lesson 2 as 1/1/1900.
+  sheet.getRange(lessonRow, 2).setNumberFormat("0");
+  sheet.getRange(lessonRow, 6).setNumberFormat("0.0#");
   try {
     sheet.getRange(firstRow, 1, rows.length, TIMESHEET_WRITE_COLUMNS).setValues(rows);
     // Sheets saves writes in batches; flushing here makes any refusal show up now, inside this

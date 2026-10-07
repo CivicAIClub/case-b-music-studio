@@ -114,6 +114,36 @@ test("landing row: a tab that ends right after its last real row gets a new row 
   assert.deepEqual(w.shown("2026-2027")[4], ["10/15/2026", 3, "Avery", "Sample", "Lunch", 0.75, "Guitar"]);
 });
 
+test("landing row: Lesson No. and Total Hours get number formats, even in a pre-made row with date formats and no lesson row above", () => {
+  // The first lesson on a tab of pre-made rows: no lesson row above to copy from, and the
+  // pre-made row's B and F have a date format (Sheets would show lesson 2 as 1/1/1900).
+  const jordanLesson = lesson(jordan, "2026-10-16", "C Block", "3:00 PM", "3:45 PM");
+  const w = buildWorld({ tabs: newLayout({ rows: [] }), lessons: [averyRegular, jordanLesson] });
+  const tab = w.tab("2026-2027");
+  tab.cell(2, 2).format = "M/d/yyyy";
+  tab.cell(2, 6).format = "M/d/yyyy";
+  const r = w.post("add-timesheet-row", keyOf(averyRegular));
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.rowNumber, 2);
+  assert.equal(tab.peek(2, 2).format, "0");
+  assert.equal(tab.peek(2, 6).format, "0.0#");
+  assert.equal(tab.valueAt(2, 2), 1);
+  assert.equal(tab.valueAt(2, 6), 0.75);
+  // Nothing to copy from, and only A (its usual date handling), B and F got a number format.
+  assert.ok(!w.ts.writes.some((x) => x.kind === "copy"));
+  const formats = () => w.ts.writes.filter((x) => x.kind === "numberFormat")
+    .map((x) => [x.row, x.col, x.numRows, x.numCols, x.format]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  assert.deepEqual(formats(), [[2, 1, 1, 1, "M/d/yyyy"], [2, 2, 1, 1, "0"], [2, 6, 1, 1, "0.0#"]]);
+
+  // The next lesson copies row 2's look, but a bad format there doesn't come along.
+  tab.cell(2, 2).format = "M/d/yyyy";
+  const r2 = w.post("add-timesheet-row", keyOf(jordanLesson));
+  assert.equal(r2.rowNumber, 3);
+  assert.equal(tab.peek(3, 2).format, "0");
+  assert.equal(tab.peek(3, 6).format, "0.0#");
+  assert.equal(tab.peek(3, 1).format, "M/d/yyyy");
+});
+
 test("landing row: a ticked box or text past G in the landing row stops the add, with nothing written", () => {
   const w = buildWorld({ tabs: newLayout(), lessons: [averyRegular] });
   const tab = w.tab("2026-2027");
