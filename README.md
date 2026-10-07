@@ -43,6 +43,7 @@ Open the URL Vite prints (usually `http://localhost:5173`). To build a productio
 ```bash
 npm run build
 npm run preview   # optional local preview of the build
+npm test          # runs apps-script/Code.gs against pretend Google Sheets (made-up data)
 ```
 
 **Data:** The app loads **students and schedules from your Google Apps Script** (see API client comments). Mock data is not used for the live roster.
@@ -78,7 +79,7 @@ After any change to `apps-script/Code.gs`, **redeploy a new version** (Manage de
 
 #### Sheet formatting (one-time)
 
-After updating Code.gs in the editor, select `setupSheetFormatting` from the function dropdown and click ▶ Run. This styles every tab (Form Responses 1, Lesson Schedule, Lesson Recaps, all per-student tabs) with the Pomfret palette and applies warning-only protection to the auto-managed `Status` and `Calendar Event ID` columns. Idempotent — safe to re-run.
+After updating Code.gs in the editor, select `setupSheetFormatting` from the function dropdown and click ▶ Run. This styles every tab (Form Responses 1, Lesson Schedule, Lesson Recaps, all per-student tabs) with the Pomfret palette and applies warning-only protection to the auto-managed `Status`, `Calendar Event ID` and `Time Sheet` columns (adding the last two if they're missing). Idempotent — safe to re-run.
 
 ### Phase 2 — Calendar event creation
 
@@ -187,6 +188,46 @@ Composite key `(Student Email, Lesson Date, Start Time)` — same as Phase 2's c
 - **Compose / edit:** Students page → click a student → in their **Recent** lessons list, each row gets a `Write recap` button (or `View recap` / `Edit` if one exists). Compose modal pre-fills `Hi {Name},` automatically and persists drafts to localStorage.
 - **Browse all:** new **Recaps** tab in the top nav (`/recaps`) — read-only listing grouped by student, with a name/email filter.
 
+### Phase 6 — Time sheet (payroll)
+
+Mr. O'Neal is paid per private lesson and logs every lesson in a payroll time sheet: a separate Google Sheet that the music director signs off and the business office pays from. The Dashboard's **Time sheet** card (right after Pending lessons) lists every lesson that has ended since the start date, isn't Cancelled, and isn't on the time sheet yet, oldest first. **Preview** shows the exact row that will be added (with dropdowns for Lesson No., Block, Total Hours and Music Subject, text boxes for the names, and warnings in plain words); **Add to time sheet** appends it and says "Added to 2026-2027, row N". **Skip** (after a confirm) marks a lesson that didn't happen or was already typed in by hand. **Open time sheet** links to the sheet; its address reaches the browser only at runtime, from `timesheet-status`.
+
+**What the script writes, and what it never touches**
+
+- It appends one row per lesson directly below the last used row of the school-year tab (`2026-2027` holds August 2026 to July 2027), columns **A to G only**: the date (a real date, shown M/d/yyyy), Lesson No., first name, last name, Block, Total Hours, Music Subject. Values are written as the exact item from the time sheet's lookup lists, with the same type (the number `1`, not the text `"1"`).
+- It never edits or deletes an existing row, never writes column H (Dir. of Music Sign.) or I (Paid on paydate), never touches the `(CHAPEL/MISC.)` tabs, and only *reads* the lookup tabs (`Lesson No.`, `Block`, `hours`, `Instrument`) and the `First Name` / `Last Name` tabs.
+- Year tabs are matched by exact name. If the school year's tab doesn't exist yet, it is created just before the newest year tab, copying that tab's header row, frozen panes, column widths and the B/E/F/G dropdowns.
+- The first lesson of a term gets a label row above it (`Fall 2026`, `Winter 2026-27`, `Spring 2027`), unless a label for that term is already typed below the last lesson. No week or spacer rows.
+- Lesson numbers follow the sheet's own count, per student and per term: a number sets the count, `Double` adds 2, and `No Show`, `Late Cancel` or a blank leave it alone. A 90-minute lesson is `Double` with 1.5 hours; anything else is 0.75. Past the end of the list (lesson 10), the cell is left for him to pick.
+- Each added or skipped lesson gets a note in a new auto-managed **Time Sheet** column on the Lesson Schedule (`Added 10/7/2026` or `Skipped`), which keeps it off the card. If the same date and student are already on the tab, nothing new is appended; only the note is written, so trying again after a failed call is always safe.
+
+**One-time setup (in the Apps Script editor)**
+
+1. Share the time sheet as **Editor** with the Google account the web app runs as (Deploy → Manage deployments shows it under "Execute as").
+2. Project Settings → Script Properties → Add property:
+   - `TIMESHEET_SPREADSHEET_ID` = the time sheet's ID. Pasting its whole URL also works: the script takes the part between `/d/` and the next `/`.
+   - `TIMESHEET_START_DATE` = the first lesson date to offer, written like `2026-10-07`. Use the day after the last lesson that was typed in by hand: the tool never offers anything earlier.
+
+   Never commit either value. If either is missing, the card says "The time sheet isn't connected yet".
+3. Paste the new `Code.gs` (see below), save, and run `authorize()`. Its first log line is `Code version: …`, followed by `OK TIMESHEET_SPREADSHEET_ID: "<sheet title>", tab 2026-2027` and `OK TIMESHEET_START_DATE: <date>`, or a `PROBLEM …` line saying what to fix.
+4. Run `setupSheetFormatting()` once. It adds the Time Sheet column, grayed out and warning-protected like Calendar Event ID.
+5. Deploy → Manage deployments → ✏️ → Version: **New version** → Deploy. The `/exec` URL stays the same.
+
+**Deploy order:** paste and deploy `Code.gs` first, then merge the website. The new actions are additive, so the old site keeps working in between.
+
+**Pasting Code.gs:** `scripts/copy-to-apps-script.sh` prints the branch, the last commit, `CODE_VERSION`, the line count and the first 12 characters of the file's SHA-256, then copies `apps-script/Code.gs` to the clipboard (macOS `pbcopy`). Paste it over everything in the editor's `Code.gs`. After deploying, `ping` returns `codeVersion`, so you can confirm which version is live.
+
+| Action | Body fields | Effect |
+|---|---|---|
+| `timesheet-status` | (none beyond `secret`) | Whether the time sheet is connected (and if not, why, in plain words), its link and title, today's school-year tab, the start date, `codeVersion`, and the dropdown lists. Read-only. |
+| `preview-timesheet-row` | `studentEmail`, `lessonDate`, `startTime`, optional `overrides` | The exact A-G row, the tab (and whether it will be created), whether a term label row is added, and warnings. Read-only. |
+| `add-timesheet-row` | same + optional `overrides: { lessonNo, firstName, lastName, block, hours, subject }` | Appends the row (or, if it's already there, only marks the lesson). Returns `{ tab, rowNumber, row, alreadyThere }`. |
+| `skip-timesheet-row` | `studentEmail`, `lessonDate`, `startTime` | Marks the lesson `Skipped`. Never touches the time sheet. |
+
+**Strict ("Reject input") dropdowns:** Google's documentation says a rule set to reject input rejects invalid data, but it doesn't say whether that also applies to values a script writes. Double lessons are written as 1.5, which isn't on the `hours` list. If Google ever refuses a row, the preview pop-up shows a plain-English message naming the value, and nothing is added or marked.
+
+**Tests:** `npm test` runs `Code.gs` in Node (`node:test` and `node:vm`, no extra packages) against pretend Google Sheets with made-up data: lesson numbering, label rows and text dates, exact tab names, the new-tab path, block and instrument mapping, name splitting, duplicates and retries, the start-date cutoff, and that H and I are never written. CI runs it on every pull request.
+
 ## App structure (prototype)
 
 - **Dashboard** — roster count, student name search (links to Students with profile open), recent updates and upcoming lessons when APIs succeed.
@@ -201,12 +242,13 @@ Composite key `(Student Email, Lesson Date, Start Time)` — same as Phase 2's c
 - Branch from `main` as `feature/<short-description>`, `fix/<short-description>`, or `chore/<short-description>` (lowercase, hyphens).
 - Every change goes through a pull request with at least one approval. `main` cannot be pushed to directly.
 - Never commit secrets. `.env.local` is gitignored; `.env.example` holds only placeholders.
-- After changing `apps-script/Code.gs`, redeploy a **new version** in the Apps Script editor or the live site keeps running the old code.
+- After changing `apps-script/Code.gs`, bump `CODE_VERSION` near its top, paste it with `scripts/copy-to-apps-script.sh`, and redeploy a **new version** in the Apps Script editor, or the live site keeps running the old code.
+- `npm test` and `npm run build` must both pass before you push (CI runs both).
 - Cursor rules for this project are committed in `.cursor/rules/`. You do not need to paste anything into your IDE settings.
 - The full Git walkthrough for beginners is the club's **[Developer Onboarding Guide](https://github.com/CivicAIClub/docs/blob/main/developer-onboarding.md)**.
 
 ## Status
-🟢 Phases 1–5 shipped: dashboard, inline student profiles, calendar event creation, class and per-student Drive resources, teacher lesson recaps. Pomfret-styled shell, deployed to GitHub Pages.
+🟢 Phases 1–6 shipped: dashboard, inline student profiles, calendar event creation, class and per-student Drive resources, teacher lesson recaps, and the payroll time sheet connection. Pomfret-styled shell, deployed to GitHub Pages.
 
 ## History
 

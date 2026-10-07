@@ -43,6 +43,13 @@ export type ScheduledLesson = {
    * Auto-populated by the `create-event` Apps Script action.
    */
   calendarEventId: string;
+  /**
+   * Phase 6: what happened to this lesson on the payroll time sheet, from the sheet's
+   * "Time Sheet" column: "Added 10/7/2026" once it's on the time sheet, "Skipped", or an
+   * empty string when it hasn't been logged yet (also when the column doesn't exist yet).
+   * Written only by the add-timesheet-row and skip-timesheet-row Apps Script actions.
+   */
+  timeSheet: string;
 };
 
 /**

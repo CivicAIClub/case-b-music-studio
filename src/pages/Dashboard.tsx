@@ -6,10 +6,12 @@
 //   1. The student roster (the "Form Responses 1" tab): a total count, a quick search, and a
 //      list of what changed in students' form answers since the teacher's last visit.
 //   2. The lesson schedule (the "Lesson Schedule" tab): lessons still waiting to be put on
-//      Google Calendar ("pending"), and upcoming lessons.
+//      Google Calendar ("pending"), lessons that have ended and still need to go on the payroll
+//      time sheet (the "Time sheet" card), and upcoming lessons.
 //   3. Shared Google Drive folders, plus handy links to the Sheet and the sign-up Google Form.
 // The code that actually talks to Google lives in src/api/ (appsScriptStudent.ts,
-// appsScriptSchedule.ts, appsScriptCalendar.ts). The boxed sections come from src/components/.
+// appsScriptSchedule.ts, appsScriptCalendar.ts, appsScriptTimesheet.ts). The boxed sections come
+// from src/components/.
 // The "import" lines below borrow those pieces, plus React's built-in helpers, from other files.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
@@ -36,6 +38,7 @@ import {
 } from "../lib/externalLinks";
 import { LessonRow } from "../components/LessonRow";
 import { PendingLessonsSection } from "../components/PendingLessonsSection";
+import { TimesheetSection } from "../components/TimesheetSection";
 import { EventPreviewModal } from "../components/EventPreviewModal";
 import { ClassResourcesSection } from "../components/ClassResourcesSection";
 import { StudentFoldersSyncCard } from "../components/StudentFoldersSyncCard";
@@ -149,6 +152,12 @@ export function Dashboard() {
   // counter makes the schedule effect above load the schedule again, so the lesson moves
   // from "pending" to "upcoming".
   const handleEventCreated = useCallback(() => {
+    setScheduleRefreshToken((n) => n + 1);
+  }, []);
+
+  // Called by the Time sheet card after a lesson is added to the time sheet or skipped. Reloading
+  // the schedule brings in the lesson's new "Time Sheet" note, which keeps it off the card.
+  const handleTimesheetChanged = useCallback(() => {
     setScheduleRefreshToken((n) => n + 1);
   }, []);
 
@@ -423,6 +432,14 @@ export function Dashboard() {
         <PendingLessonsSection
           lessons={scheduleLessons}
           onPreview={openPreviewFor}
+        />
+
+        {/* Card: lessons that have ended but aren't on the payroll time sheet yet (Phase 6). */}
+        {/* "Preview" opens the time sheet pop-up; adding or skipping reloads the schedule. */}
+        <TimesheetSection
+          lessons={scheduleLessons}
+          scheduleLoadStatus={scheduleLoadStatus}
+          onChanged={handleTimesheetChanged}
         />
 
         {/* Card: upcoming lessons, soonest first, each with a Cancel option. */}

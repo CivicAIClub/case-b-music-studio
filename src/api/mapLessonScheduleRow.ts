@@ -18,6 +18,11 @@ const SCHEDULE_KEYS = {
    * been scheduled yet.
    */
   calendarEventId: "Calendar Event ID",
+  /**
+   * Phase 6 column. Auto-added by the Apps Script side the first time a lesson is added to
+   * (or skipped for) the payroll time sheet. A missing column reads as empty: "not marked".
+   */
+  timeSheet: "Time Sheet",
 } as const;
 
 function cell(raw: Record<string, unknown>, key: string): string {
@@ -53,5 +58,6 @@ export function mapScheduleRowToLesson(
     lessonFocus: cell(raw, SCHEDULE_KEYS.lessonFocus),
     note: cellNote(raw),
     calendarEventId: cell(raw, SCHEDULE_KEYS.calendarEventId),
+    timeSheet: cell(raw, SCHEDULE_KEYS.timeSheet),
   };
 }

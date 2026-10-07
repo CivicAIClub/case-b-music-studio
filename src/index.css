@@ -1694,6 +1694,156 @@ a:hover {
   }
 }
 
+/* Time sheet section (Phase 6) ────────────────────────────────────── */
+/* Reuses the Pending lessons list; adds a header row with the "Open time sheet" link, two
+   buttons per lesson (Skip, Preview), and the preview pop-up's form. */
+.timesheet-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-4);
+}
+
+.timesheet-card__header > div {
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+
+.timesheet-card__open {
+  white-space: nowrap;
+}
+
+.timesheet-card__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.timesheet-card__error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+@media (max-width: 600px) {
+  .timesheet-card__actions .button {
+    flex: 1 1 0;
+  }
+}
+
+.timesheet-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.timesheet-modal__where {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: var(--text-soft);
+}
+
+.timesheet-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-4);
+}
+
+.timesheet-field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.timesheet-field .label {
+  margin-bottom: 0.3rem;
+}
+
+.timesheet-field .input,
+.timesheet-field .select {
+  padding: 0.5rem 0.7rem;
+}
+
+.timesheet-field__fixed {
+  padding: 0.5rem 0;
+  font-weight: 600;
+}
+
+.timesheet-form__note {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.timesheet-warnings {
+  padding: var(--space-3) var(--space-4);
+  background: var(--status-warning-soft);
+  color: var(--status-warning);
+  border-radius: var(--radius-sm);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.timesheet-warnings__title {
+  margin: 0 0 0.35rem;
+  font-weight: 700;
+}
+
+.timesheet-warnings ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.timesheet-warnings li + li {
+  margin-top: 0.3rem;
+}
+
+.timesheet-modal__recheck {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+}
+
+.timesheet-modal__recheck p {
+  margin: 0;
+  flex: 1 1 16rem;
+}
+
+.timesheet-existing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.timesheet-existing__row {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr));
+  gap: var(--space-2) var(--space-4);
+}
+
+.timesheet-existing__row dt {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.timesheet-existing__row dd {
+  margin: 0.15rem 0 0;
+}
+
+@media (max-width: 600px) {
+  .timesheet-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Event preview modal ─────────────────────────────────────────────── */
 .modal-overlay {
   position: fixed;

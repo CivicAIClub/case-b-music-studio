@@ -2,9 +2,10 @@
 // The schedule comes from the "Lesson Schedule" tab in the studio's Google Sheet (fetched by
 // src/api/appsScriptSchedule.ts). These helpers answer questions like: Is this lesson still
 // waiting to be put on the calendar ("Pending")? Is it coming up ("Upcoming")? Is it already
-// over ("History")? What order should lessons be listed in? How should the time be shown?
-// The Dashboard, the Students page, and pieces like LessonRow, PendingLessonsSection, and
-// RecapsTimeline use these answers to decide what to show where.
+// over ("History")? Does it still need to go on the payroll time sheet? What order should
+// lessons be listed in? How should the time be shown?
+// The Dashboard, the Students page, and pieces like LessonRow, PendingLessonsSection,
+// TimesheetSection, and RecapsTimeline use these answers to decide what to show where.
 // Nothing here talks to Google; it only looks at lessons that were already loaded.
 // Borrow the shape of a "lesson" and a helper that reads dates the way the sheet writes them.
 import type { ScheduledLesson } from "../types";
@@ -200,6 +201,49 @@ export function isUpcomingLesson(lesson: ScheduledLesson, now: Date = new Date()
   const endDt = lessonEndDateTime(lesson);
   if (!endDt) return true;
   return endDt.getTime() >= now.getTime();
+}
+
+// Decide whether a lesson belongs on the Dashboard's "Time sheet" card (Phase 6): it is dated
+// on or after the time sheet's start date, it has ended, it isn't Cancelled, and its Time Sheet
+// note is still empty (not "Added …" or "Skipped"). A lesson whose end time can't be read counts
+// as ended once its whole day is over. Gives back true or false. "now" can be changed for testing.
+/**
+ * Phase 6: an ended, not-cancelled, not-yet-logged lesson on or after `startDate`
+ * ("yyyy-MM-dd", from the TIMESHEET_START_DATE Script Property).
+ */
+export function isReadyForTimesheet(
+  lesson: ScheduledLesson,
+  startDate: string,
+  now: Date = new Date()
+): boolean {
+  // Already added or skipped: nothing to do.
+  if (lesson.timeSheet.trim() !== "") return false;
+  // Cancelled lessons never go on the time sheet.
+  const st = normalizeStatus(lesson.status).toLowerCase();
+  if (st === "cancelled" || st === "canceled") return false;
+  // Lessons before the start date were typed into the time sheet by hand.
+  const day = lessonDateTime(lesson);
+  const start = parseSheetDate(startDate);
+  if (!day || !start) return false;
+  if (startOfLocalDay(day).getTime() < startOfLocalDay(start).getTime()) return false;
+  // It must be over: past its end time, or (with no readable end time) past the end of its day.
+  const end = lessonEndDateTime(lesson);
+  if (end) return end.getTime() <= now.getTime();
+  const nextDay = startOfLocalDay(day);
+  nextDay.setDate(nextDay.getDate() + 1);
+  return nextDay.getTime() <= now.getTime();
+}
+
+// Give back the lessons for the Dashboard's Time sheet card, oldest first.
+/** Phase 6: lessons ready for the time sheet, oldest first. */
+export function timesheetLessonsSorted(
+  lessons: ScheduledLesson[],
+  startDate: string,
+  now?: Date
+): ScheduledLesson[] {
+  return lessons
+    .filter((l) => isReadyForTimesheet(l, startDate, now))
+    .sort(compareLessonsByDateTime);
 }
 
 // Give back only the pending lessons, soonest first. Used by the Dashboard's Pending card.
