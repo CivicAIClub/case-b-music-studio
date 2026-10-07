@@ -74,7 +74,7 @@ test("status: a time sheet the script can't open is 'not connected', with the sh
   const w = buildWorld({ props: { SHARED_SECRET: SECRET, TIMESHEET_SPREADSHEET_ID: "SOME-OTHER-SHEET-ID", TIMESHEET_START_DATE: "2026-09-01" } });
   const r = w.post("timesheet-status");
   assert.equal(r.configured, false);
-  assert.match(r.reason, /share the time sheet as Editor with the Google account the web app runs as/);
+  assert.match(r.reason, /share the time sheet as Editor with the Google account the web app runs as\. \(Google said: Unexpected error while getting the method or property openById/);
 });
 
 test("ping returns CODE_VERSION; a wrong secret is refused", () => {
@@ -110,7 +110,8 @@ test("authorize: says plainly when a setting is missing or the sheet can't be op
   const w2 = buildWorld({ props: { SHARED_SECRET: SECRET, TIMESHEET_SPREADSHEET_ID: "SOME-OTHER-SHEET-ID", TIMESHEET_START_DATE: "2026-09-01" } });
   w2.ctx.authorize();
   assert.ok(w2.logs.includes(
-    "PROBLEM TIMESHEET_SPREADSHEET_ID: can't open it: share the time sheet as Editor with the Google account this script runs as (script.owner@example.org)."
+    "PROBLEM TIMESHEET_SPREADSHEET_ID: can't open it: share the time sheet as Editor with the Google account this script runs as (script.owner@example.org). " +
+    "(Google said: Unexpected error while getting the method or property openById on object SpreadsheetApp.)"
   ), w2.logs.join("\n"));
   assert.ok(w2.logs.includes("OK TIMESHEET_START_DATE: 2026-09-01"));
 });

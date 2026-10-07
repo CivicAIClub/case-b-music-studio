@@ -2600,7 +2600,7 @@ function handleTimesheetStatus(payload) {
   try {
     ts = SpreadsheetApp.openById(config.id);
   } catch (err) {
-    answer.reason = TIMESHEET_CANT_OPEN_MESSAGE;
+    answer.reason = TIMESHEET_CANT_OPEN_MESSAGE + googleSaid(err);
     return answer;
   }
 
@@ -2800,8 +2800,15 @@ function openTimesheet(id) {
   try {
     return SpreadsheetApp.openById(id);
   } catch (err) {
-    throw new Error(TIMESHEET_CANT_OPEN_MESSAGE);
+    throw new Error(TIMESHEET_CANT_OPEN_MESSAGE + googleSaid(err));
   }
+}
+
+// googleSaid turns Google's own error words into a short ending for a plain-English message, like
+// " (Google said: You do not have permission to access the requested document.)".
+function googleSaid(err) {
+  var raw = String(err && err.message ? err.message : err).replace(/^Exception:\s*/, "").trim();
+  return raw ? " (Google said: " + raw + ")" : "";
 }
 
 // requireLessonKey checks the request names a lesson (student email, lesson date, start time) and
@@ -3844,7 +3851,8 @@ function checkTimesheetForAuthorize() {
       var me = effectiveUserEmail();
       lines.push(
         "PROBLEM " + TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + ": can't open it: share the time " +
-        "sheet as Editor with the Google account this script runs as" + (me ? " (" + me + ")" : "") + "."
+        "sheet as Editor with the Google account this script runs as" + (me ? " (" + me + ")" : "") +
+        "." + googleSaid(err)
       );
     }
     if (ts) {
