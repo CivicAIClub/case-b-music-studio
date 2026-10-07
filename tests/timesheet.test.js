@@ -227,13 +227,13 @@ test("labels: a hand-typed 'Winter TERM' label below the last lesson means no se
 
 test("labels: 'End of Spring' and 'Holiday Break' rows are skipped, text dates count", () => {
   const w = buildWorld({ tabs: withTab2026(), lessons: [averyRegular] });
-  const rows = w.ctx.readYearTabRows(w.tab("2026-2027"), "America/New_York");
+  const rows = w.ctx.readYearTabRows_(w.tab("2026-2027"), "America/New_York");
   const dated = rows.filter((r) => r.dateKey).map((r) => r.dateKey);
   assert.deepEqual(Array.from(dated), ["2026-09-10", "2026-09-17", "2026-09-24", "2026-10-01", "2026-10-08"]);
-  assert.equal(w.ctx.timesheetDateKey("Week 1", "America/New_York"), null);
-  assert.equal(w.ctx.timesheetDateKey("End of Spring 2025", "America/New_York"), null);
-  assert.equal(w.ctx.timesheetDateKey("2/30/2026", "America/New_York"), null);
-  assert.equal(w.ctx.timesheetDateKey("9/10/2026", "America/New_York"), "2026-09-10");
+  assert.equal(w.ctx.timesheetDateKey_("Week 1", "America/New_York"), null);
+  assert.equal(w.ctx.timesheetDateKey_("End of Spring 2025", "America/New_York"), null);
+  assert.equal(w.ctx.timesheetDateKey_("2/30/2026", "America/New_York"), null);
+  assert.equal(w.ctx.timesheetDateKey_("9/10/2026", "America/New_York"), "2026-09-10");
 });
 
 test("terms and tabs: Fall, Winter and Spring dates map to the right label and school-year tab", () => {
@@ -248,8 +248,8 @@ test("terms and tabs: Fall, Winter and Spring dates map to the right label and s
     ["2027-08-01", "Fall 2027", "2027-2028"],
   ];
   for (const [key, label, tab] of cases) {
-    assert.equal(w.ctx.termFor(key).label, label, key);
-    assert.equal(w.ctx.schoolYearTabName(key), tab, key);
+    assert.equal(w.ctx.termFor_(key).label, label, key);
+    assert.equal(w.ctx.schoolYearTabName_(key), tab, key);
   }
 });
 
