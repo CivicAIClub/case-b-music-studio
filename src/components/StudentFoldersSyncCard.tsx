@@ -45,7 +45,7 @@ export function StudentFoldersSyncCard() {
     >
       <p className="admin-tool-card__eyebrow">Admin · Backfill</p>
       <h2 id="student-folders-sync-h" className="card__title admin-tool-card__title">
-        Sync student folders
+        <span aria-hidden="true">🗂️</span> Sync student folders
       </h2>
       <p className="muted profile-updates-intro">
         Personal Drive folders are auto-created on form submission. Use

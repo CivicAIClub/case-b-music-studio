@@ -30,7 +30,7 @@ export function PendingLessonsSection({
   return (
     <section className="card span-2 pending-lessons-card" aria-labelledby="pending-h">
       <h2 id="pending-h" className="card__title">
-        Pending lessons
+        <span aria-hidden="true">🗓️</span> Pending lessons
       </h2>
       <p className="muted profile-updates-intro">
         Rows in <strong>Lesson Schedule</strong> not yet on the calendar.

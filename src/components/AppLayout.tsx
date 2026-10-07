@@ -33,13 +33,13 @@ export function AppLayout() {
           </div>
           <nav className="app-top__nav" aria-label="Main navigation">
             <NavLink to="/" end className={navPillClassName}>
-              Dashboard
+              <span aria-hidden="true">🎵</span> Dashboard
             </NavLink>
             <NavLink to="/students" className={navPillClassName}>
-              Students
+              <span aria-hidden="true">🎸</span> Students
             </NavLink>
             <NavLink to="/recaps" className={navPillClassName}>
-              Recaps
+              <span aria-hidden="true">✏️</span> Recaps
             </NavLink>
             <span
               className="app-top__nav-divider"

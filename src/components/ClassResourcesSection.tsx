@@ -86,7 +86,7 @@ export function ClassResourcesSection() {
       <div className="class-resources-card__header">
         <div>
           <h2 id="class-resources-h" className="card__title">
-            Class Resources
+            <span aria-hidden="true">📁</span> Class Resources
           </h2>
           <p className="muted profile-updates-intro">
             Shared folder visible to every enrolled student. New students get
