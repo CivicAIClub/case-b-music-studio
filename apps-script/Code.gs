@@ -172,6 +172,11 @@
 // Config
 // ──────────────────────────────────────────────────────────────────────
 
+// Which version of this file is pasted into the Apps Script editor. Change it whenever Code.gs
+// changes. authorize() logs it on its first line and "ping" sends it back, so after a paste you
+// can confirm the live web app is running this exact version.
+var CODE_VERSION = "2026-10-06 phase 6 time sheet";
+
 /** Property key under which the GET/POST shared secret is stored. */
 // SETTINGS. This section holds fixed settings the rest of the file relies on: tab names, who is
 // invited to every lesson, and who can see the shared folders.
@@ -341,6 +346,50 @@ var LESSON_RECAPS_HEADERS = [
   "Next Class",
   "Updated At"
 ];
+
+/**
+ * Phase 6 — Time sheet. Mr. O'Neal is paid per private lesson and logs each one in a payroll
+ * time sheet: a separate Google Sheet with one tab per school year ("2025-2026", newest first)
+ * plus lookup tabs that feed its dropdowns. The script adds one row per lesson, A to G only.
+ * Both settings below live in Script Properties, never in this file.
+ */
+// The drawer-slot label for the time sheet's ID. Either the bare ID or the whole web address
+// pasted from the browser works; the script picks the ID out of the address.
+var TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY = "TIMESHEET_SPREADSHEET_ID";
+
+// The drawer-slot label for the first lesson date the tool may offer, written like 2026-10-05.
+// Lessons before it were already typed into the time sheet by hand and are never offered again.
+var TIMESHEET_START_DATE_PROPERTY_KEY = "TIMESHEET_START_DATE";
+
+// The title of the extra Lesson Schedule column where the script notes what happened to each
+// lesson: "Added 10/7/2026" once it is on the time sheet, or "Skipped". Auto-created on first use.
+var TIME_SHEET_COLUMN = "Time Sheet";
+
+// The time sheet's lookup tabs. Each tab's column A holds the choices for one dropdown on the
+// year tabs: Lesson No. (column B), Block (E), hours (F), and Instrument (G, "Music Subject").
+// The script only ever reads these tabs.
+var TIMESHEET_LIST_TABS = {
+  lessonNo: "Lesson No.",
+  block: "Block",
+  hours: "hours",
+  instrument: "Instrument"
+};
+
+// Mr. O'Neal's own lists of student first and last names. Read only, never written.
+var TIMESHEET_FIRST_NAME_TAB = "First Name";
+var TIMESHEET_LAST_NAME_TAB = "Last Name";
+
+// The script writes columns A to G of a year tab and nothing else. Column H (Dir. of Music Sign.)
+// and column I (Paid on paydate) are filled in by the music director and the business office.
+var TIMESHEET_WRITE_COLUMNS = 7;
+
+// Total Hours for a regular lesson, and for a double lesson (one that lasts 90 minutes).
+var TIMESHEET_REGULAR_HOURS = 0.75;
+var TIMESHEET_DOUBLE_HOURS = 1.5;
+var TIMESHEET_DOUBLE_MINUTES = 90;
+
+// The question on the sign-up form that says which instrument a student plays.
+var FORM_INSTRUMENT_QUESTION = "What instrument do you want to play?";
 
 // doGet answers "read" requests from the website: requests that only look at information and
 // never change anything. Google runs this automatically whenever someone opens this script's
@@ -619,6 +668,14 @@ function doPost(e) {
         return jsonResponse(handleListRecapsForStudent(payload));
       case "list-recaps":
         return jsonResponse(handleListRecaps(payload));
+      case "timesheet-status":
+        return jsonResponse(handleTimesheetStatus(payload));
+      case "preview-timesheet-row":
+        return jsonResponse(handlePreviewTimesheetRow(payload));
+      case "add-timesheet-row":
+        return jsonResponse(handleAddTimesheetRow(payload));
+      case "skip-timesheet-row":
+        return jsonResponse(handleSkipTimesheetRow(payload));
       default:
         return jsonResponse({ ok: false, error: "Unknown action: " + action });
     }
@@ -700,8 +757,8 @@ function getSharedSecret() {
  * (no arguments) — the payload is treated as optional.
  */
 // handlePing is a simple "are you there?" test. It changes nothing and just replies "pong", with
-// the current time and the spreadsheet's name, so a developer can confirm the website and this
-// script are connected and the password works.
+// the current time, the spreadsheet's name, and CODE_VERSION, so a developer can confirm the
+// website and this script are connected, the password works, and which version is live.
 function handlePing(payload) {
   // If the test included a short message, send it straight back (an "echo").
   var message = payload && typeof payload.message === "string"
@@ -712,7 +769,8 @@ function handlePing(payload) {
     pong: true,
     ts: Date.now(),
     echo: message,
-    spreadsheet: SpreadsheetApp.getActiveSpreadsheet().getName()
+    spreadsheet: SpreadsheetApp.getActiveSpreadsheet().getName(),
+    codeVersion: CODE_VERSION
   };
 }
 
@@ -918,6 +976,9 @@ function cancelEventLocked(payload) {
 // each Google service once so all the permission pop-ups appear together, and writes a short
 // report to the log showing whether each piece is set up correctly.
 function authorize() {
+  // First line of the log: which version of this file is running, so a paste can be confirmed.
+  Logger.log("Code version: " + CODE_VERSION);
+
   // Touch each service so Apps Script knows it must request the
   // corresponding OAuth scope. Logger output is purely informational.
   var ssName = SpreadsheetApp.getActiveSpreadsheet().getName();
@@ -944,17 +1005,27 @@ function authorize() {
   Logger.log("Drive root:               " + rootName);
   Logger.log("Class Resources:          " + classResourcesName);
   Logger.log("Student Resources parent: " + studentResourcesParentName);
+
+  // Phase 6: open the time sheet too (so the permission prompt covers it) and report, in plain
+  // words, whether both time sheet settings are ready. A problem here never stops authorize().
+  var timesheet = checkTimesheetForAuthorize();
+  timesheet.lines.forEach(function (line) {
+    Logger.log(line);
+  });
+
   Logger.log(
     "Authorization complete. Re-deploy (Manage deployments → ✏️ → New version) " +
     "if you haven't already."
   );
   return {
     ok: true,
+    codeVersion: CODE_VERSION,
     spreadsheet: ssName,
     calendar: calName,
     driveRoot: rootName,
     classResources: classResourcesName,
-    studentResourcesParent: studentResourcesParentName
+    studentResourcesParent: studentResourcesParentName,
+    timesheet: timesheet.summary
   };
 }
 
@@ -1095,17 +1166,29 @@ function findLessonRowFromPayload(payload) {
 // ensureCalendarEventIdColumn adds a "Calendar Event ID" column to the end of the Lesson
 // Schedule tab if it isn't there yet, and styles it. If the column already exists, it does nothing.
 function ensureCalendarEventIdColumn(sheet) {
+  ensureAutoManagedColumn(sheet, CALENDAR_EVENT_ID_COLUMN);
+}
+
+// ensureAutoManagedColumn adds a column the website fills in by itself (such as "Calendar Event
+// ID" or "Time Sheet") to the end of the Lesson Schedule tab if it isn't there yet, styles it,
+// and puts the "please don't edit" warning on it. It gives back the column's number (counting
+// from 1), or -1 if the tab is completely empty.
+function ensureAutoManagedColumn(sheet, columnName) {
   // Read the title row, and stop if the tab is empty or the column is already there.
   var lastCol = sheet.getLastColumn();
-  if (lastCol < 1) return;
+  if (lastCol < 1) return -1;
   var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
   for (var i = 0; i < headers.length; i++) {
-    if (String(headers[i]).trim() === CALENDAR_EVENT_ID_COLUMN) return;
+    if (String(headers[i]).trim() === columnName) return i + 1;
   }
   // Otherwise, add the title in the next empty column, in bold white on the studio's crimson.
+  // (If the tab has no spare column left, add one first.)
   var newCol = lastCol + 1;
+  if (newCol > sheet.getMaxColumns()) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), 1);
+  }
   sheet.getRange(1, newCol)
-    .setValue(CALENDAR_EVENT_ID_COLUMN)
+    .setValue(columnName)
     .setFontWeight("bold")
     .setFontColor(FMT_HEADER_TEXT)
     .setBackground(FMT_HEADER_BG);
@@ -1113,11 +1196,12 @@ function ensureCalendarEventIdColumn(sheet) {
   // off-limits from the moment the column appears, even before the
   // teacher runs setupSheetFormatting().
   try {
-    highlightAutoManagedColumn(sheet, newCol, CALENDAR_EVENT_ID_COLUMN);
+    highlightAutoManagedColumn(sheet, newCol, columnName);
     protectAutoManagedColumn(sheet, newCol);
   } catch (err) {
-    Logger.log("ensureCalendarEventIdColumn: highlight/protect failed: " + err);
+    Logger.log("ensureAutoManagedColumn(" + columnName + "): highlight/protect failed: " + err);
   }
+  return newCol;
 }
 
 /**
@@ -2421,6 +2505,1355 @@ function compareRecapsNewestFirst(a, b) {
   return bMin - aMin;
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Phase 6 — Time sheet
+// ──────────────────────────────────────────────────────────────────────
+
+// TIME SHEET: Mr. O'Neal is paid per private lesson, and he logs every lesson in a payroll time
+// sheet (a separate Google Sheet that the music director signs off and the business office pays
+// from). These functions add each lesson he teaches to that time sheet, so he never types it
+// twice. The rules they always follow:
+//   - Append only. A new row goes directly below the last used row of the school-year tab.
+//     Existing time sheet rows are never edited or deleted.
+//   - Only columns A to G are written. H (signature) and I (pay date) are never touched.
+//   - The CHAPEL/MISC. tabs are never touched, and the lookup tabs are only read.
+//   - A lesson is offered only if it is dated on or after TIMESHEET_START_DATE.
+// After a lesson is added (or skipped), the Lesson Schedule's "Time Sheet" column says so.
+
+// The message shown whenever the script can't open the time sheet. Google gives the same kind
+// of error for a wrong ID and for a sheet that isn't shared, so the message covers both.
+var TIMESHEET_CANT_OPEN_MESSAGE =
+  "The script can't open the time sheet. Check the TIMESHEET_SPREADSHEET_ID Script Property, " +
+  "and share the time sheet as Editor with the Google account the web app runs as.";
+
+/**
+ * timesheet-status. Never throws for a setup problem; it answers
+ * { configured: false, reason } instead so the dashboard can say "not connected yet".
+ */
+// handleTimesheetStatus tells the website whether the time sheet is connected. If it is, it also
+// sends the sheet's link and title, the tab today's lessons go to, the start date, and the
+// choices in each dropdown list. If not, it says which setting is the problem, in plain words.
+function handleTimesheetStatus(payload) {
+  // Start with a "not connected" answer and fill it in as each check passes.
+  var config = readTimesheetConfig();
+  var answer = {
+    ok: true,
+    configured: false,
+    sheetUrl: null,
+    sheetTitle: null,
+    targetTab: null,
+    startDate: config.startDate,
+    codeVersion: CODE_VERSION,
+    lists: { lessonNo: [], block: [], hours: [], instrument: [] }
+  };
+  if (!config.ok) {
+    answer.reason = config.reason;
+    return answer;
+  }
+
+  // Both settings are there; now try to open the time sheet itself.
+  var ts;
+  try {
+    ts = SpreadsheetApp.openById(config.id);
+  } catch (err) {
+    answer.reason = TIMESHEET_CANT_OPEN_MESSAGE;
+    return answer;
+  }
+
+  // Connected. Work out today's school-year tab (in the time sheet's own time zone) and read
+  // the dropdown lists from the lookup tabs.
+  var tz = ts.getSpreadsheetTimeZone();
+  var targetTab = schoolYearTabName(Utilities.formatDate(new Date(), tz, "yyyy-MM-dd"));
+  answer.configured = true;
+  answer.sheetUrl = ts.getUrl();
+  answer.sheetTitle = ts.getName();
+  answer.targetTab = targetTab;
+  answer.targetTabExists = findYearTab(ts, targetTab) !== null;
+  answer.lists = readTimesheetLists(ts).values;
+  return answer;
+}
+
+// handlePreviewTimesheetRow shows exactly which row WOULD be added to the time sheet for one
+// lesson (student email, lesson date, start time), without changing anything. It also says which
+// tab the row goes to, whether that tab would be created, whether a term label row would be added
+// above it, and plain-English warnings for anything the teacher should check first.
+function handlePreviewTimesheetRow(payload) {
+  var ctx = loadTimesheetLesson(payload);
+  var plan = planTimesheetRow(ctx, readTimesheetOverrides(payload));
+  return {
+    ok: true,
+    tab: plan.tab,
+    createsTab: plan.createsTab,
+    insertBefore: plan.insertBefore,
+    termLabel: plan.termLabel,
+    addsTermLabel: plan.addsTermLabel,
+    row: plan.cells,
+    fields: plan.fields,
+    duplicate: plan.duplicate,
+    warnings: plan.warnings,
+    lists: plan.lists,
+    mark: plan.mark,
+    lesson: plan.lesson,
+    sheetUrl: ctx.ts.getUrl(),
+    sheetTitle: ctx.ts.getName()
+  };
+}
+
+// handleAddTimesheetRow adds one lesson to the time sheet and notes it on the Lesson Schedule.
+// It takes the same lock as the other changes, so two clicks (or two browser tabs) can't add
+// the same lesson twice. The real work happens in addTimesheetRowLocked, just below.
+function handleAddTimesheetRow(payload) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30 * 1000)) {
+    throw new Error(
+      "Another change is in progress for this studio. Please try again in a moment."
+    );
+  }
+  try {
+    return addTimesheetRowLocked(payload);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// addTimesheetRowLocked does the adding, only while the lock is held, in this order:
+//   1. check (again, with a fresh read) whether the lesson is already on the tab,
+//   2. append the row,
+//   3. write "Added <date>" in the lesson's Time Sheet cell on the Lesson Schedule.
+// If the lesson is already on the tab, nothing is appended; only the note is written. That makes
+// a retry safe after a call that added the row but failed before writing the note.
+function addTimesheetRowLocked(payload) {
+  var ctx = loadTimesheetLesson(payload);
+  if (isSkippedMark(ctx.mark)) {
+    throw new Error(
+      'This lesson is marked "Skipped" on the Lesson Schedule. To add it after all, clear its ' +
+      "Time Sheet cell there, then try again."
+    );
+  }
+  var plan = planTimesheetRow(ctx, readTimesheetOverrides(payload));
+
+  // Step 1: already on the tab? Then don't add a second row; just write the note.
+  if (plan.duplicate) {
+    var existingMark = isAddedMark(ctx.mark) ? ctx.mark : addedMarkText(ctx.studioTz);
+    if (!isAddedMark(ctx.mark)) {
+      writeTimesheetMark(ctx.found, existingMark, plan.tab, plan.duplicate.rowNumber);
+    }
+    return {
+      ok: true,
+      alreadyThere: true,
+      tab: plan.tab,
+      rowNumber: plan.duplicate.rowNumber,
+      row: plan.duplicate.cells,
+      createdTab: false,
+      labelRowNumber: null,
+      mark: existingMark
+    };
+  }
+
+  // The Lesson Schedule says it was added, but no matching row is on the tab. Rather than guess,
+  // stop: someone may have deleted the row, or the name may be spelled differently there.
+  if (isAddedMark(ctx.mark)) {
+    throw new Error(
+      'This lesson is already marked "' + ctx.mark + '" on the Lesson Schedule, but no row for ' +
+      "it was found on " + plan.tab + " (it may have been deleted, or the name may be spelled " +
+      "differently). To add it again, clear its Time Sheet cell on the Lesson Schedule first."
+    );
+  }
+
+  // Step 2: append the row (with a term label row above it when this starts a new term).
+  var appended = appendTimesheetRow(ctx, plan);
+
+  // Step 3: note it on the Lesson Schedule, so it leaves the dashboard's list.
+  var mark = addedMarkText(ctx.studioTz);
+  writeTimesheetMark(ctx.found, mark, plan.tab, appended.rowNumber);
+  return {
+    ok: true,
+    alreadyThere: false,
+    tab: plan.tab,
+    rowNumber: appended.rowNumber,
+    row: plan.cells,
+    createdTab: appended.createdTab,
+    labelRowNumber: appended.labelRowNumber,
+    mark: mark,
+    warnings: plan.warnings
+  };
+}
+
+// handleSkipTimesheetRow marks one lesson "Skipped" on the Lesson Schedule: it didn't happen, or
+// it's already on the time sheet. It never opens or changes the time sheet.
+function handleSkipTimesheetRow(payload) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30 * 1000)) {
+    throw new Error(
+      "Another change is in progress for this studio. Please try again in a moment."
+    );
+  }
+  try {
+    requireLessonKey(payload);
+    var found = findLessonRowFromPayload(payload);
+    var mark = String(found.row[TIME_SHEET_COLUMN] || "").trim();
+    // A lesson that is already on the time sheet keeps its "Added" note.
+    if (isAddedMark(mark)) {
+      throw new Error('This lesson is already marked "' + mark + '", so there is nothing to skip.');
+    }
+    if (!isSkippedMark(mark)) writeTimesheetMark(found, "Skipped", null, null);
+    return { ok: true, skipped: true, mark: "Skipped" };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Phase 6 — settings and the lesson being logged
+// ──────────────────────────────────────────────────────────────────────
+
+// readTimesheetConfig reads the two time sheet settings from the settings drawer (Script
+// Properties). It gives back { ok, id, startDate } when both are usable, or { ok: false, reason }
+// naming what's wrong in plain words. startDate is included whenever it is a real date.
+function readTimesheetConfig() {
+  var props = PropertiesService.getScriptProperties();
+  var rawId = String(props.getProperty(TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY) || "").trim();
+  var rawStart = String(props.getProperty(TIMESHEET_START_DATE_PROPERTY_KEY) || "").trim();
+  var startDate = isValidDateKey(rawStart) ? rawStart : null;
+
+  // Collect every problem, so one message covers them all.
+  var problems = [];
+  if (!rawId) {
+    problems.push("the " + TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + " Script Property isn't set");
+  } else if (!spreadsheetIdFromSetting(rawId)) {
+    problems.push(TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + " doesn't look like a Google Sheets ID or link");
+  }
+  if (!rawStart) {
+    problems.push("the " + TIMESHEET_START_DATE_PROPERTY_KEY + " Script Property isn't set");
+  } else if (!startDate) {
+    problems.push(
+      TIMESHEET_START_DATE_PROPERTY_KEY + ' should be a date written like 2026-10-05, not "' +
+      rawStart + '"'
+    );
+  }
+  if (problems.length > 0) {
+    var reason = problems.join(", and ") + ".";
+    return { ok: false, reason: reason.charAt(0).toUpperCase() + reason.substring(1), startDate: startDate };
+  }
+  return { ok: true, id: spreadsheetIdFromSetting(rawId), startDate: startDate };
+}
+
+// spreadsheetIdFromSetting accepts either a bare spreadsheet ID or a whole Google Sheets web
+// address, and gives back just the ID (the part between "/d/" and the next "/"). It gives back ""
+// if the text doesn't look like an ID.
+function spreadsheetIdFromSetting(raw) {
+  var text = String(raw || "").trim();
+  var marker = text.indexOf("/d/");
+  if (marker !== -1) {
+    // Keep what follows "/d/", up to the next "/" (or "?" or "#", in case the address ends there).
+    text = text.substring(marker + 3).split(/[\/?#]/)[0];
+  }
+  return /^[A-Za-z0-9_-]{10,}$/.test(text) ? text : "";
+}
+
+// openTimesheet opens the time sheet by its ID, or stops with a plain-English message.
+function openTimesheet(id) {
+  try {
+    return SpreadsheetApp.openById(id);
+  } catch (err) {
+    throw new Error(TIMESHEET_CANT_OPEN_MESSAGE);
+  }
+}
+
+// requireLessonKey checks the request names a lesson (student email, lesson date, start time) and
+// stops with a plain-English message if a piece is missing.
+function requireLessonKey(payload) {
+  if (!String((payload && payload.studentEmail) || "").trim() ||
+      !String((payload && payload.lessonDate) || "").trim()) {
+    throw new Error("The request didn't say which lesson (a student email and a lesson date are needed).");
+  }
+  if (!String((payload && payload.startTime) || "").trim()) {
+    throw new Error(
+      "This lesson has no Start Time on the Lesson Schedule. Add one there, refresh the page, " +
+      "and try again."
+    );
+  }
+}
+
+// loadTimesheetLesson gathers what is needed to plan a time sheet row for one lesson: the two
+// settings, the lesson's row on the Lesson Schedule, and the opened time sheet. It stops with a
+// plain-English message if the time sheet isn't connected, or if the lesson can't be offered
+// (dated before TIMESHEET_START_DATE, not happened yet, or cancelled).
+function loadTimesheetLesson(payload) {
+  requireLessonKey(payload);
+  var config = readTimesheetConfig();
+  if (!config.ok) {
+    throw new Error("The time sheet isn't connected yet. " + config.reason);
+  }
+
+  // Find the lesson on the Lesson Schedule and read its date as year-month-day, using the studio
+  // spreadsheet's own time zone.
+  var found = findLessonRowFromPayload(payload);
+  var studioTz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+  var lessonDateKey = dateKeyFromLessonCell(found.row["Lesson Date"], studioTz);
+  if (!lessonDateKey) {
+    throw new Error(
+      'Can\'t read this lesson\'s date on the Lesson Schedule ("' + found.row["Lesson Date"] + '").'
+    );
+  }
+
+  // Lessons before the start date were typed into the time sheet by hand: never offer them.
+  if (lessonDateKey < config.startDate) {
+    throw new Error(
+      "This lesson (" + displayDateFromKey(lessonDateKey) + ") is dated before " +
+      TIMESHEET_START_DATE_PROPERTY_KEY + " (" + displayDateFromKey(config.startDate) + "). " +
+      "Lessons before that date were typed into the time sheet by hand, so the tool doesn't offer them."
+    );
+  }
+  // A lesson that hasn't happened yet can't be paid for yet.
+  var todayKey = Utilities.formatDate(new Date(), studioTz, "yyyy-MM-dd");
+  if (lessonDateKey > todayKey) {
+    throw new Error(
+      "This lesson (" + displayDateFromKey(lessonDateKey) + ") hasn't happened yet, so it can't " +
+      "go on the time sheet."
+    );
+  }
+  // Cancelled lessons are left off the time sheet.
+  var status = String(found.row["Status"] || "").trim().toLowerCase();
+  if (status === "cancelled" || status === "canceled") {
+    throw new Error("This lesson is marked Cancelled on the Lesson Schedule, so it isn't added to the time sheet.");
+  }
+
+  var ts = openTimesheet(config.id);
+  return {
+    config: config,
+    found: found,
+    studioTz: studioTz,
+    lessonDateKey: lessonDateKey,
+    ts: ts,
+    tsTz: ts.getSpreadsheetTimeZone(),
+    mark: String(found.row[TIME_SHEET_COLUMN] || "").trim()
+  };
+}
+
+// readTimesheetOverrides reads the values the teacher changed in the preview window (lesson
+// number, first and last name, block, hours, subject). A value that wasn't sent is left out, so
+// the script works it out itself; an empty value means "leave this cell blank".
+function readTimesheetOverrides(payload) {
+  var raw = payload && payload.overrides;
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("overrides must be an object");
+  }
+  var out = {};
+  ["lessonNo", "firstName", "lastName", "block", "hours", "subject"].forEach(function (key) {
+    if (Object.prototype.hasOwnProperty.call(raw, key) && raw[key] !== undefined && raw[key] !== null) {
+      out[key] = raw[key];
+    }
+  });
+  return out;
+}
+
+// hasOverride says whether the teacher sent a value for one field (see readTimesheetOverrides).
+function hasOverride(overrides, key) {
+  return Object.prototype.hasOwnProperty.call(overrides, key);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Phase 6 — planning the row
+// ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Builds the A-G row for one lesson plus everything the preview shows. Used by both
+ * preview-timesheet-row and add-timesheet-row, so what the teacher previews is what gets written.
+ */
+// planTimesheetRow works out the row for one lesson: which tab, the seven values for columns A to
+// G, whether a term label row goes above it, whether the lesson is already on the tab, and a list
+// of plain-English warnings. Values the teacher changed in the preview window win over the
+// script's own suggestions.
+function planTimesheetRow(ctx, overrides) {
+  var row = ctx.found.row;
+  var warnings = [];
+  // Short notes like "Total Hours 1.5", reused in the error message if Google refuses the row.
+  var notOnList = [];
+
+  // The dropdown choices, read fresh from the lookup tabs.
+  var lists = readTimesheetLists(ctx.ts);
+  lists.missingTabs.forEach(function (tabName) {
+    warnings.push(
+      'The time sheet has no "' + tabName + '" tab, so that column can\'t be checked against its dropdown list.'
+    );
+  });
+
+  // Which school-year tab and which term the lesson belongs to.
+  var tabName = schoolYearTabName(ctx.lessonDateKey);
+  var term = termFor(ctx.lessonDateKey);
+  var tab = findYearTab(ctx.ts, tabName);
+  var newest = tab ? null : newestYearTab(ctx.ts);
+  var tabRows = tab ? readYearTabRows(tab, ctx.tsTz) : [];
+  if (!tab && !newest) {
+    warnings.push(
+      "The time sheet has no school-year tab (like 2025-2026) to copy, so the tool can't create " +
+      tabName + ". Add that tab by hand first."
+    );
+  }
+
+  // Columns C and D: first and last name. The sign-up form's name wins; the Lesson Schedule's
+  // Student Name is the backup. The name is split at its first space.
+  var email = String(row["Student Email"] || "").trim().toLowerCase();
+  var fullName = getStudentNameMap()[email] || String(row["Student Name"] || "").trim();
+  var names = splitStudentName(fullName);
+  var namesTyped = hasOverride(overrides, "firstName") || hasOverride(overrides, "lastName");
+  var firstName = hasOverride(overrides, "firstName")
+    ? cleanCellText(String(overrides.firstName), "First name")
+    : names.first;
+  var lastName = hasOverride(overrides, "lastName")
+    ? cleanCellText(String(overrides.lastName), "Last name")
+    : names.last;
+  if (!namesTyped && names.warning) warnings.push(names.warning);
+
+  // Column F: total hours, from how long the lesson is (90 minutes is a double).
+  var minutes = lessonMinutes(row, ctx.studioTz);
+  var hours;
+  if (hasOverride(overrides, "hours")) {
+    hours = listValueOrRaw(lists.values.hours, overrides.hours, "Total Hours");
+  } else {
+    var ninetyMinutes = minutes === TIMESHEET_DOUBLE_MINUTES;
+    hours = listValueOrRaw(
+      lists.values.hours,
+      ninetyMinutes ? TIMESHEET_DOUBLE_HOURS : TIMESHEET_REGULAR_HOURS,
+      "Total Hours"
+    );
+    if (minutes === null) {
+      warnings.push(
+        "This lesson has no end time on the Lesson Schedule, so it's counted as a regular " +
+        "lesson (0.75 hours)."
+      );
+    } else if (!ninetyMinutes && minutes !== 45) {
+      warnings.push(
+        "This lesson is " + minutes + " minutes long. The time sheet uses 0.75 for a regular " +
+        "lesson and 1.5 for a double (90 minutes), so 0.75 is filled in. Check the hours."
+      );
+    }
+  }
+  var isDouble = sameListValue(hours, TIMESHEET_DOUBLE_HOURS);
+
+  // Column B: the lesson number, counted per student, per term, the way the time sheet does.
+  var count = countStudentLessons(tabRows, term, firstName, lastName);
+  var lessonNo;
+  if (hasOverride(overrides, "lessonNo")) {
+    lessonNo = listValueOrRaw(lists.values.lessonNo, overrides.lessonNo, "Lesson No.");
+  } else if (isDouble) {
+    lessonNo = listValueOrRaw(lists.values.lessonNo, "Double", "Lesson No.");
+  } else {
+    var next = count.running + 1;
+    var highest = highestNumberOnList(lists.values.lessonNo) || 9;
+    var onList = findListItem(lists.values.lessonNo, next);
+    if (next > highest || (!onList.found && lists.values.lessonNo.length > 0)) {
+      // Past the end of the list: don't guess, let the teacher pick.
+      lessonNo = "";
+      warnings.push(
+        "By the time sheet's count this would be lesson " + next + ", but the Lesson No. list " +
+        "stops at " + highest + ". Pick the lesson number."
+      );
+    } else {
+      lessonNo = onList.found ? onList.value : next;
+    }
+  }
+  if (count.prior === 0) {
+    warnings.push(
+      sameListValue(lessonNo, 1)
+        ? "No earlier lessons for this student this term, so this is lesson 1. If that's wrong, " +
+          "the name may be spelled differently on the time sheet."
+        : "No earlier lessons for this student this term. If that's wrong, the name may be " +
+          "spelled differently on the time sheet."
+    );
+  }
+
+  // Column E: the block. "C Block" on the Lesson Schedule becomes "C" on the time sheet.
+  var block;
+  if (hasOverride(overrides, "block")) {
+    block = listValueOrRaw(lists.values.block, overrides.block, "Block");
+  } else {
+    var mappedBlock = mapBlockToList(row["Lesson Block"], lists.values.block);
+    block = mappedBlock.value;
+    if (mappedBlock.warning) warnings.push(mappedBlock.warning);
+  }
+
+  // Column G: the music subject, from the instrument on the student's latest sign-up form.
+  var subject;
+  if (hasOverride(overrides, "subject")) {
+    subject = listValueOrRaw(lists.values.instrument, overrides.subject, "Music Subject");
+  } else {
+    var mappedSubject = mapInstrumentToList(formInstrumentAnswer(email), lists.values.instrument);
+    subject = mappedSubject.value;
+    if (mappedSubject.warning) warnings.push(mappedSubject.warning);
+  }
+
+  // Check every dropdown value against its list, so nothing surprising reaches the time sheet.
+  checkOnList("Lesson No.", lessonNo, lists.values.lessonNo, warnings, notOnList);
+  checkOnList("Block", block, lists.values.block, warnings, notOnList);
+  if (hours !== "" && lists.values.hours.length > 0 && !findListItem(lists.values.hours, hours).found) {
+    notOnList.push("Total Hours " + hours);
+    warnings.push(
+      isDouble
+        ? "1.5 isn't on the time sheet's hours list. Doubles are written as 1.5 anyway; if the " +
+          "hours dropdown is set to reject other values, Google may refuse the row, and you'll " +
+          "see why here."
+        : 'Total Hours "' + hours + "\" isn't on the time sheet's hours list."
+    );
+  }
+  checkOnList("Music Subject", subject, lists.values.instrument, warnings, notOnList);
+
+  // If columns C and D use Mr. O'Neal's First Name / Last Name lists as dropdowns, a new
+  // student won't be on them yet. That's only a warning; it never blocks adding.
+  if (tab) {
+    nameListWarnings(tab, tabRows, firstName, lastName).forEach(function (w) {
+      warnings.push(w.message);
+      notOnList.push(w.note);
+    });
+  }
+
+  // Is this lesson already on the tab (same date, same student)? Then nothing will be appended.
+  var duplicateRow = findDuplicateRow(tabRows, ctx.lessonDateKey, firstName, lastName);
+  var duplicate = null;
+  if (duplicateRow) {
+    duplicate = { rowNumber: duplicateRow.rowNumber, cells: displayCells(duplicateRow.cells, ctx.tsTz) };
+    warnings.unshift(
+      "This lesson is already on " + tabName + " (row " + duplicateRow.rowNumber + "). Adding " +
+      "won't create a second row; it only marks the lesson as added."
+    );
+  }
+
+  var fields = {
+    lessonNo: lessonNo,
+    firstName: firstName,
+    lastName: lastName,
+    block: block,
+    hours: hours,
+    subject: subject
+  };
+  return {
+    tab: tabName,
+    createsTab: !tab,
+    insertBefore: newest ? String(newest.getName()) : null,
+    term: term,
+    termLabel: term.label,
+    addsTermLabel: !duplicate && needsTermLabel(tabRows, term),
+    lessonDateKey: ctx.lessonDateKey,
+    fields: fields,
+    cells: [displayDateFromKey(ctx.lessonDateKey), lessonNo, firstName, lastName, block, hours, subject],
+    duplicate: duplicate,
+    warnings: warnings,
+    notOnList: notOnList,
+    lists: lists.values,
+    mark: ctx.mark,
+    lesson: {
+      studentEmail: email,
+      studentName: fullName,
+      lessonDate: ctx.lessonDateKey,
+      startTime: clockText(row["Start Time"], ctx.studioTz),
+      endTime: clockText(row["End Time"], ctx.studioTz),
+      lessonBlock: String(row["Lesson Block"] || "").trim(),
+      minutes: minutes
+    }
+  };
+}
+
+// checkOnList adds a warning when a filled-in dropdown value isn't one of its list's choices.
+function checkOnList(label, value, list, warnings, notOnList) {
+  if (value === "" || list.length === 0) return;
+  if (findListItem(list, value).found) return;
+  notOnList.push(label + " " + value);
+  warnings.push(label + ' "' + value + "\" isn't on the time sheet's " + label + " list.");
+}
+
+// splitStudentName splits a full name at its first space into a first and last name, with a
+// warning when the name isn't exactly two words (or is missing).
+function splitStudentName(fullName) {
+  var clean = String(fullName || "").trim().replace(/\s+/g, " ");
+  if (!clean) {
+    return {
+      first: "",
+      last: "",
+      warning: "No name was found for this student on the sign-up form or the Lesson Schedule. " +
+        "Type the first and last name."
+    };
+  }
+  var space = clean.indexOf(" ");
+  if (space === -1) {
+    return {
+      first: clean,
+      last: "",
+      warning: 'The name "' + clean + '" is one word, so the last name is blank. Type it before adding.'
+    };
+  }
+  var first = clean.substring(0, space);
+  var last = clean.substring(space + 1);
+  var words = clean.split(" ").length;
+  return {
+    first: first,
+    last: last,
+    warning: words === 2
+      ? null
+      : 'The name "' + clean + '" has ' + words + ' words, so it was split as first name "' +
+        first + '" and last name "' + last + '". Check that it matches the time sheet.'
+  };
+}
+
+// lessonMinutes works out how long a lesson is, in minutes, from its start and end times. It
+// gives back nothing (null) if either time is missing or unreadable.
+function lessonMinutes(row, tz) {
+  var start = parseWallClockTime(clockText(row["Start Time"], tz));
+  var end = parseWallClockTime(clockText(row["End Time"], tz));
+  if (!start || !end) return null;
+  var minutes = (end.h * 60 + end.m) - (start.h * 60 + start.m);
+  // A lesson that runs past midnight (rare) ends "earlier" than it starts; add a day.
+  if (minutes <= 0) minutes += 24 * 60;
+  return minutes;
+}
+
+// clockText turns a time cell into text like "3:30 PM". Most times already arrive as text; a
+// cell that holds a full date and time is shown in the given time zone.
+function clockText(value, tz) {
+  if (value instanceof Date) return Utilities.formatDate(value, tz, "h:mm a");
+  return String(value === null || value === undefined ? "" : value).trim();
+}
+
+// mapBlockToList turns the Lesson Schedule's block (like "C Block") into the time sheet's Block
+// choice (like "C"). A value that is already on the list passes straight through. Anything else
+// is left blank with a warning, so the teacher picks it.
+function mapBlockToList(raw, list) {
+  var text = String(raw === null || raw === undefined ? "" : raw).trim();
+  if (!text) {
+    return {
+      value: "",
+      warning: "This lesson has no Lesson Block on the Lesson Schedule, so Block is blank. Pick one."
+    };
+  }
+  var exact = findListItem(list, text);
+  if (exact.found) return { value: exact.value };
+  // "C Block" → "C", "Lunch Block" → "Lunch".
+  var withoutWord = text.replace(/\s+block\s*$/i, "");
+  if (withoutWord !== text) {
+    var stripped = findListItem(list, withoutWord);
+    if (stripped.found) return { value: stripped.value };
+  }
+  if (list.length === 0) return { value: withoutWord };
+  return {
+    value: "",
+    warning: 'The Lesson Schedule says "' + text + "\", which isn't on the time sheet's Block " +
+      "list, so Block is blank. Pick one."
+  };
+}
+
+// mapInstrumentToList turns the instrument a student wrote on the sign-up form into one of the
+// time sheet's Music Subject choices: "electric guitar" → Guitar, "bass guitar" → Bass. When it
+// can't tell (no answer, an instrument that isn't on the list, or two different instruments), it
+// leaves the cell blank with a warning, so the teacher picks.
+function mapInstrumentToList(answer, list) {
+  var text = String(answer || "").trim();
+  if (!text) {
+    return {
+      value: "",
+      warning: "The sign-up form has no instrument for this student, so Music Subject is blank. Pick one."
+    };
+  }
+  if (list.length === 0) return { value: "" };
+  var exact = findListItem(list, text);
+  if (exact.found) return { value: exact.value };
+
+  // Look for each choice as a whole word in the answer ("uke" counts as "ukulele").
+  var lower = " " + listKey(text).replace(/\buke\b/g, "ukulele") + " ";
+  var hits = [];
+  list.forEach(function (item) {
+    var word = listKey(item);
+    if (!word) return;
+    var match = new RegExp("[^a-z0-9]" + escapeRegExp(word) + "[^a-z0-9]").exec(lower);
+    if (match) hits.push({ item: item, index: match.index + 1, word: word });
+  });
+  hits.sort(function (a, b) { return a.index - b.index; });
+
+  // One instrument named: that's it.
+  if (hits.length === 1) return { value: hits[0].item };
+  // Two names side by side, like "bass guitar": the first word names the instrument.
+  if (hits.length === 2) {
+    var between = lower.substring(hits[0].index + hits[0].word.length, hits[1].index);
+    if (/^\s+$/.test(between)) return { value: hits[0].item };
+  }
+  return {
+    value: "",
+    warning: 'The sign-up form says "' + text + '", which doesn\'t match one of the time sheet\'s ' +
+      "instruments (" + list.join(", ") + "), so Music Subject is blank. Pick one."
+  };
+}
+
+// formInstrumentAnswer finds what a student wrote for "What instrument do you want to play?" on
+// their latest sign-up form (a later non-blank answer replaces an earlier one).
+function formInstrumentAnswer(email) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Form Responses 1");
+  if (!sheet) return "";
+  var data = sheet.getDataRange().getValues();
+  if (data.length < 2) return "";
+  var headers = data[0].map(function (h) {
+    return String(h || "").trim().toLowerCase();
+  });
+  var emailCol = headers.indexOf("email address");
+  var instrumentCol = headers.indexOf(FORM_INSTRUMENT_QUESTION.toLowerCase());
+  // If the question was reworded, fall back to the first column that mentions "instrument".
+  if (instrumentCol === -1) {
+    for (var c = 0; c < headers.length; c++) {
+      if (headers[c].indexOf("instrument") !== -1) {
+        instrumentCol = c;
+        break;
+      }
+    }
+  }
+  if (emailCol === -1 || instrumentCol === -1) return "";
+  var answer = "";
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][emailCol] || "").trim().toLowerCase() !== email) continue;
+    var value = String(data[r][instrumentCol] || "").trim();
+    if (value) answer = value;
+  }
+  return answer;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Phase 6 — the time sheet's tabs and rows
+// ──────────────────────────────────────────────────────────────────────
+
+// termFor says which school term a date (like "2026-10-05") falls in. Fall is Aug 1 to Nov 30,
+// Winter is Dec 1 to the end of February, Spring is Mar 1 to Jul 31. It gives back the school
+// year's first year, the term's name, an ID for comparing, and the label for a term label row:
+// "Fall 2026", "Winter 2026-27", or "Spring 2027".
+function termFor(dateKey) {
+  var year = Number(dateKey.substring(0, 4));
+  var month = Number(dateKey.substring(5, 7));
+  // August to December belong to the school year starting this year; January to July to the
+  // one that started last year.
+  var start = month >= 8 ? year : year - 1;
+  var name;
+  if (month >= 8 && month <= 11) name = "Fall";
+  else if (month === 12 || month <= 2) name = "Winter";
+  else name = "Spring";
+  var label;
+  if (name === "Fall") label = "Fall " + start;
+  else if (name === "Winter") label = "Winter " + start + "-" + String(start + 1).substring(2);
+  else label = "Spring " + (start + 1);
+  return { schoolYearStart: start, name: name, id: start + " " + name, label: label };
+}
+
+// schoolYearTabName gives the name of the school-year tab a date belongs to: August to December
+// of 2026 → "2026-2027", January to July of 2027 → "2026-2027".
+function schoolYearTabName(dateKey) {
+  var start = termFor(dateKey).schoolYearStart;
+  return start + "-" + (start + 1);
+}
+
+// findYearTab finds a school-year tab by its exact name (surrounding spaces ignored). It never
+// matches by "starts with" or "contains", because the CHAPEL/MISC. tab names hold the year too.
+function findYearTab(ss, name) {
+  var sheets = ss.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    if (String(sheets[i].getName()).trim() === name) return sheets[i];
+  }
+  return null;
+}
+
+// newestYearTab finds the newest school-year tab: the one named like "2025-2026" with the
+// latest years. CHAPEL/MISC. tabs never count. Gives back nothing (null) if there is none.
+function newestYearTab(ss) {
+  var best = null;
+  var bestYear = -1;
+  ss.getSheets().forEach(function (sheet) {
+    var m = /^(\d{4})-(\d{4})$/.exec(String(sheet.getName()).trim());
+    if (!m || Number(m[2]) !== Number(m[1]) + 1) return;
+    if (Number(m[1]) > bestYear) {
+      bestYear = Number(m[1]);
+      best = sheet;
+    }
+  });
+  return best;
+}
+
+// findSheetByLooseName finds a tab by name: an exact match first, then one that differs only in
+// capital letters or surrounding spaces. Used for the lookup tabs, whose names hold no year.
+function findSheetByLooseName(ss, name) {
+  var sheets = ss.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].getName() === name) return sheets[i];
+  }
+  for (var j = 0; j < sheets.length; j++) {
+    if (listKey(sheets[j].getName()) === listKey(name)) return sheets[j];
+  }
+  return null;
+}
+
+// readTimesheetLists reads every dropdown list from the time sheet's lookup tabs: the non-blank
+// cells in column A, exactly as they are (a number stays a number). It also names any lookup tab
+// that is missing.
+function readTimesheetLists(ts) {
+  var values = {};
+  var missingTabs = [];
+  Object.keys(TIMESHEET_LIST_TABS).forEach(function (key) {
+    var sheet = findSheetByLooseName(ts, TIMESHEET_LIST_TABS[key]);
+    if (!sheet) {
+      values[key] = [];
+      missingTabs.push(TIMESHEET_LIST_TABS[key]);
+      return;
+    }
+    var lastRow = sheet.getLastRow();
+    values[key] = lastRow < 1
+      ? []
+      : sheet.getRange(1, 1, lastRow, 1).getValues()
+        .map(function (r) { return r[0]; })
+        .filter(function (v) {
+          return v !== "" && v !== null && v !== undefined && !(v instanceof Date);
+        });
+  });
+  return { values: values, missingTabs: missingTabs };
+}
+
+// readYearTabRows reads columns A to G of every row below the title row of a school-year tab.
+// For each row it notes the row number, the date in column A as year-month-day (or nothing for
+// label rows like "Fall 2025" or "Week 1", and for blank rows), the lesson number, and the name.
+function readYearTabRows(sheet, tz) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  var values = sheet.getRange(2, 1, lastRow - 1, TIMESHEET_WRITE_COLUMNS).getValues();
+  return values.map(function (cells, i) {
+    return {
+      rowNumber: i + 2,
+      a: cells[0],
+      dateKey: timesheetDateKey(cells[0], tz),
+      lessonNo: cells[1],
+      first: cells[2],
+      last: cells[3],
+      cells: cells
+    };
+  });
+}
+
+// timesheetDateKey reads column A of a time sheet row as a date, written year-month-day. A real
+// date counts (read in the time sheet's own time zone), and so does text like "9/10/2026".
+// Anything else (a label like "Week 1", or a blank) gives back nothing (null).
+function timesheetDateKey(value, tz) {
+  if (value instanceof Date) {
+    if (isNaN(value.getTime()) || value.getFullYear() < 1900) return null;
+    return Utilities.formatDate(value, tz, "yyyy-MM-dd");
+  }
+  if (typeof value === "string") return dateKeyFromSlashDate(value);
+  return null;
+}
+
+// countStudentLessons follows the time sheet's own numbering for one student in one term. It
+// walks the student's rows in that term from top to bottom, starting at 0: a number n sets the
+// count to n, "Double" adds 2, and "No Show", "Late Cancel" or a blank leave it alone. The next
+// lesson is that count plus 1. It also counts how many of the student's rows it saw.
+function countStudentLessons(rows, term, first, last) {
+  var running = 0;
+  var prior = 0;
+  if (!nameKey(first) && !nameKey(last)) return { running: 0, prior: 0 };
+  rows.forEach(function (r) {
+    if (!r.dateKey || termFor(r.dateKey).id !== term.id) return;
+    if (!sameStudentName(r, first, last)) return;
+    prior++;
+    var n = lessonNumberValue(r.lessonNo);
+    if (n !== null) {
+      running = n;
+    } else if (listKey(r.lessonNo) === "double") {
+      running += 2;
+    }
+  });
+  return { running: running, prior: prior };
+}
+
+// needsTermLabel decides whether a term label row (like "Fall 2026") goes above the new row: yes
+// when no row on the tab is dated in that term yet, unless the teacher already typed a label for
+// that term below the last dated row (like "Winter TERM").
+function needsTermLabel(rows, term) {
+  var lastDated = -1;
+  for (var i = 0; i < rows.length; i++) {
+    if (!rows[i].dateKey) continue;
+    if (termFor(rows[i].dateKey).id === term.id) return false;
+    lastDated = i;
+  }
+  var word = new RegExp("\\b" + term.name.toLowerCase() + "\\b");
+  for (var j = lastDated + 1; j < rows.length; j++) {
+    if (typeof rows[j].a !== "string") continue;
+    var text = rows[j].a.trim().toLowerCase();
+    if (!text || /^end\b/.test(text)) continue;
+    if (word.test(text)) return false;
+  }
+  return true;
+}
+
+// findDuplicateRow finds a row on the tab with the same date and the same student (first and
+// last name, ignoring capitals and extra spaces). Gives back that row, or nothing (null).
+function findDuplicateRow(rows, dateKey, first, last) {
+  if (!nameKey(first) && !nameKey(last)) return null;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].dateKey === dateKey && sameStudentName(rows[i], first, last)) return rows[i];
+  }
+  return null;
+}
+
+// sameStudentName says whether a time sheet row is for the given student (first + last name,
+// trimmed, ignoring capital letters).
+function sameStudentName(row, first, last) {
+  return nameKey(row.first) === nameKey(first) && nameKey(row.last) === nameKey(last);
+}
+
+// nameKey tidies a name for comparing: no outside spaces, single inside spaces, lowercase.
+function nameKey(value) {
+  return String(value === null || value === undefined ? "" : value).trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+// lessonNumberValue reads a Lesson No. cell as a number (1, or the text "1"), or gives back
+// nothing (null) for "Double", "No Show", "Late Cancel", a blank, and anything else.
+function lessonNumberValue(value) {
+  if (typeof value === "number" && isFinite(value)) return value;
+  var text = String(value === null || value === undefined ? "" : value).trim();
+  return /^\d+$/.test(text) ? Number(text) : null;
+}
+
+// highestNumberOnList gives the biggest number on a list (9 for the Lesson No. list), or 0 if
+// the list holds no numbers.
+function highestNumberOnList(list) {
+  var highest = 0;
+  list.forEach(function (item) {
+    var n = lessonNumberValue(item);
+    if (n !== null && n > highest) highest = n;
+  });
+  return highest;
+}
+
+// displayCells turns a row's A to G values into what the time sheet shows: dates as M/d/yyyy.
+function displayCells(cells, tz) {
+  return cells.map(function (value) {
+    return value instanceof Date ? Utilities.formatDate(value, tz, "M/d/yyyy") : value;
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Phase 6 — dropdown lists
+// ──────────────────────────────────────────────────────────────────────
+
+// listKey tidies a value for comparing with a list choice: text, trimmed, single spaces,
+// lowercase. So "1PM Shadow Block" matches the list's "1PM  Shadow Block" (two spaces).
+function listKey(value) {
+  return String(value === null || value === undefined ? "" : value).trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+// sameListValue says whether two values mean the same choice: the same text (see listKey), or
+// the same number (so 1 matches "1", and 0.75 matches "0.75").
+function sameListValue(a, b) {
+  var ka = listKey(a);
+  var kb = listKey(b);
+  if (ka === kb) return true;
+  if (ka === "" || kb === "") return false;
+  var na = Number(ka);
+  var nb = Number(kb);
+  return isFinite(na) && isFinite(nb) && na === nb;
+}
+
+// findListItem looks for a value on a dropdown list. It gives back { found: true, value } with
+// the list's own copy of the choice (so the exact text, and a number stays a number), or
+// { found: false }.
+function findListItem(list, value) {
+  for (var i = 0; i < list.length; i++) {
+    if (sameListValue(list[i], value)) return { found: true, value: list[i] };
+  }
+  return { found: false };
+}
+
+// listValueOrRaw gives back the list's own copy of a choice when the value is on the list, so it
+// is written exactly as the dropdown expects. Otherwise it gives back the value as typed (text
+// that looks like a number becomes a number, the way Sheets treats typing). Blank stays blank.
+function listValueOrRaw(list, value, label) {
+  if (typeof value === "string" && value.trim() === "") return "";
+  var match = findListItem(list, value);
+  if (match.found) return match.value;
+  if (typeof value === "number") {
+    if (!isFinite(value)) throw new Error(label + " must be a number or a choice from its list.");
+    return value;
+  }
+  var text = cleanCellText(String(value), label);
+  return /^-?\d+(\.\d+)?$/.test(text) ? Number(text) : text;
+}
+
+// cleanCellText checks text the teacher typed before it goes on the time sheet: trimmed, not
+// too long, and never starting with "=" (which Sheets would treat as a formula).
+function cleanCellText(text, label) {
+  var clean = String(text).trim();
+  if (clean.length > 80) throw new Error(label + " is too long (80 characters at most).");
+  if (clean.charAt(0) === "=") throw new Error(label + ' can\'t start with "=".');
+  return clean;
+}
+
+// escapeRegExp makes text safe to search for inside a pattern (so "1PM" or "Dept." match
+// literally).
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// nameListWarnings checks the tab's first-name and last-name columns (C and D). Only if their
+// dropdowns use Mr. O'Neal's First Name / Last Name tabs does it compare the student's name with
+// those lists, and only to warn: a new student won't be on them yet. The tool never writes to
+// those tabs. It gives back { message, note } pairs.
+function nameListWarnings(tab, rows, first, last) {
+  var out = [];
+  var dataRow = null;
+  for (var i = rows.length - 1; i >= 0; i--) {
+    if (rows[i].dateKey) {
+      dataRow = rows[i];
+      break;
+    }
+  }
+  if (!dataRow) return out;
+  [
+    { column: 3, letter: "C", tabName: TIMESHEET_FIRST_NAME_TAB, name: first },
+    { column: 4, letter: "D", tabName: TIMESHEET_LAST_NAME_TAB, name: last }
+  ].forEach(function (spec) {
+    if (!spec.name) return;
+    var listRange = validationListRange(tab.getRange(dataRow.rowNumber, spec.column).getDataValidation());
+    if (!listRange || listKey(listRange.getSheet().getName()) !== listKey(spec.tabName)) return;
+    var names = [];
+    listRange.getValues().forEach(function (r) {
+      r.forEach(function (v) {
+        if (v !== "" && v !== null) names.push(v);
+      });
+    });
+    if (findListItem(names, spec.name).found) return;
+    out.push({
+      message: '"' + spec.name + '" isn\'t on the ' + spec.tabName + " list that column " +
+        spec.letter + "'s dropdown uses (normal for a new student). Add it to the " +
+        spec.tabName + " tab by hand if you want it there; the tool never writes to that tab.",
+      note: spec.tabName + ' "' + spec.name + '"'
+    });
+  });
+  return out;
+}
+
+// validationListRange gives back the cells a dropdown takes its choices from, when the dropdown
+// is the "from a range" kind. Otherwise (no dropdown, or a typed-in list) it gives back nothing.
+function validationListRange(rule) {
+  if (!rule) return null;
+  try {
+    if (rule.getCriteriaType() !== SpreadsheetApp.DataValidationCriteria.VALUE_IN_RANGE) return null;
+    var criteria = rule.getCriteriaValues();
+    return criteria && criteria[0] && typeof criteria[0].getValues === "function" ? criteria[0] : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Phase 6 — writing
+// ──────────────────────────────────────────────────────────────────────
+
+// appendTimesheetRow writes the planned row directly below the last used row of the school-year
+// tab (creating the tab first if this is the school year's first lesson). When the lesson starts
+// a new term, the term label row goes in just above it. Both rows go in with one write, columns A
+// to G only. Column A gets a real date with the M/d/yyyy format, made in the time sheet's own
+// time zone so it can't land a day early. It gives back the lesson's row number.
+function appendTimesheetRow(ctx, plan) {
+  var sheet = findYearTab(ctx.ts, plan.tab);
+  var createdTab = false;
+  if (!sheet) {
+    sheet = createYearTab(ctx.ts, plan.tab, ctx.tsTz);
+    createdTab = true;
+  }
+
+  var f = plan.fields;
+  var rows = [];
+  if (plan.addsTermLabel) rows.push([plan.termLabel, "", "", "", "", "", ""]);
+  rows.push([
+    Utilities.parseDate(plan.lessonDateKey, ctx.tsTz, "yyyy-MM-dd"),
+    f.lessonNo,
+    f.firstName,
+    f.lastName,
+    f.block,
+    f.hours,
+    f.subject
+  ]);
+
+  var firstRow = sheet.getLastRow() + 1;
+  var lessonRow = firstRow + rows.length - 1;
+  ensureSheetRows(sheet, lessonRow);
+  sheet.getRange(lessonRow, 1).setNumberFormat("M/d/yyyy");
+  try {
+    sheet.getRange(firstRow, 1, rows.length, TIMESHEET_WRITE_COLUMNS).setValues(rows);
+    // Sheets saves writes in batches; flushing here makes any refusal show up now, inside this
+    // try, instead of later.
+    SpreadsheetApp.flush();
+  } catch (err) {
+    throw new Error(timesheetWriteProblem(err, plan, sheet, firstRow, rows.length));
+  }
+  return {
+    rowNumber: lessonRow,
+    labelRowNumber: plan.addsTermLabel ? firstRow : null,
+    createdTab: createdTab
+  };
+}
+
+// timesheetWriteProblem turns Google's error from a refused write into a plain-English message
+// for the website: what went wrong, whether anything landed on the tab, and Google's own words.
+function timesheetWriteProblem(err, plan, sheet, firstRow, count) {
+  var raw = String(err && err.message ? err.message : err).replace(/^Exception:\s*/, "");
+  // Check whether any of it landed, so the message can say so honestly.
+  var landed = false;
+  try {
+    landed = sheet.getRange(firstRow, 1, count, TIMESHEET_WRITE_COLUMNS).getValues().some(function (r) {
+      return r.some(function (v) { return v !== "" && v !== null; });
+    });
+  } catch (readErr) {
+    landed = false;
+  }
+  var lead;
+  if (/data validation|violates/i.test(raw)) {
+    lead = "Google Sheets refused this row because a value isn't allowed by the time sheet's dropdowns" +
+      (plan.notOnList.length > 0 ? " (" + plan.notOnList.join("; ") + ")" : "") +
+      ". Pick values from the dropdowns, or add the value to the matching list on the time sheet.";
+  } else if (/protected/i.test(raw)) {
+    lead = "That part of the time sheet is protected, so the script can't write there.";
+  } else if (/permission|access/i.test(raw)) {
+    lead = "The script can't edit the time sheet. Share it as Editor with the Google account the web app runs as.";
+  } else {
+    lead = "Google Sheets couldn't add the row.";
+  }
+  var outcome = landed
+    ? " Part of it may have been written to row " + firstRow + " of " + plan.tab +
+      ", so check the time sheet before trying again."
+    : " Nothing was added, and the lesson wasn't marked.";
+  return lead + outcome + " (Google said: " + raw + ")";
+}
+
+// createYearTab makes a new school-year tab (like "2026-2027") just before the newest existing
+// one, copying from it: the title row with its formatting, the frozen rows and columns, the
+// column widths, and the dropdowns on columns B, E, F and G (taken from one of its lesson rows).
+// No lesson rows are copied.
+function createYearTab(ts, name, tz) {
+  var template = newestYearTab(ts);
+  if (!template) {
+    throw new Error(
+      "The time sheet has no school-year tab (like 2025-2026) to copy, so the tool can't create " +
+      name + ". Add that tab by hand, then try again."
+    );
+  }
+  try {
+    var sheet = ts.insertSheet(name, template.getIndex() - 1);
+    var lastCol = Math.max(template.getLastColumn(), TIMESHEET_WRITE_COLUMNS);
+    if (sheet.getMaxColumns() < lastCol) {
+      sheet.insertColumnsAfter(sheet.getMaxColumns(), lastCol - sheet.getMaxColumns());
+    }
+    // The title row: its words and its look.
+    template.getRange(1, 1, 1, lastCol).copyTo(sheet.getRange(1, 1, 1, lastCol));
+    // The frozen title row and frozen columns, and each column's width.
+    sheet.setFrozenRows(template.getFrozenRows());
+    sheet.setFrozenColumns(template.getFrozenColumns());
+    for (var c = 1; c <= lastCol; c++) {
+      sheet.setColumnWidth(c, template.getColumnWidth(c));
+    }
+    copyYearTabDropdowns(template, sheet, tz);
+    return sheet;
+  } catch (err) {
+    throw new Error(
+      "Couldn't finish creating the " + name + " tab (" +
+      String(err && err.message ? err.message : err).replace(/^Exception:\s*/, "") + "). " +
+      "If a half-made " + name + " tab is on the time sheet, delete it, then try again."
+    );
+  }
+}
+
+// copyYearTabDropdowns copies the dropdowns of columns B, E, F and G from the template tab's
+// newest lesson row that has one, onto every row below the title on the new tab.
+function copyYearTabDropdowns(template, sheet, tz) {
+  var rows = readYearTabRows(template, tz);
+  if (rows.length === 0) return;
+  [2, 5, 6, 7].forEach(function (column) {
+    // One read per column: every row's dropdown rule for that column.
+    var rules = template.getRange(2, column, rows.length, 1).getDataValidations();
+    for (var i = rows.length - 1; i >= 0; i--) {
+      if (!rows[i].dateKey || !rules[i][0]) continue;
+      sheet.getRange(2, column, sheet.getMaxRows() - 1, 1).setDataValidation(rules[i][0]);
+      return;
+    }
+  });
+}
+
+// ensureSheetRows adds empty rows at the bottom of a tab if it has fewer than `needed` rows.
+function ensureSheetRows(sheet, needed) {
+  var maxRows = sheet.getMaxRows();
+  if (maxRows < needed) sheet.insertRowsAfter(maxRows, needed - maxRows);
+}
+
+// writeTimesheetMark writes the note ("Added 10/7/2026" or "Skipped") into the lesson's Time
+// Sheet cell on the Lesson Schedule, adding that column the first time.
+function writeTimesheetMark(found, text, tabName, rowNumber) {
+  try {
+    var column = ensureAutoManagedColumn(found.sheet, TIME_SHEET_COLUMN);
+    found.sheet.getRange(found.rowIndex, column).setValue(text);
+    SpreadsheetApp.flush();
+  } catch (err) {
+    var why = String(err && err.message ? err.message : err).replace(/^Exception:\s*/, "");
+    if (tabName) {
+      throw new Error(
+        "The row is on " + tabName + " (row " + rowNumber + "), but the Lesson Schedule couldn't " +
+        "be marked (" + why + "). Trying again is safe: the tool will see the row is already " +
+        "there and only write the mark."
+      );
+    }
+    throw new Error("The Lesson Schedule couldn't be marked (" + why + ").");
+  }
+}
+
+// addedMarkText is the note for a lesson that is on the time sheet: "Added" and today's date in
+// the studio spreadsheet's time zone, like "Added 10/7/2026".
+function addedMarkText(studioTz) {
+  return "Added " + Utilities.formatDate(new Date(), studioTz, "M/d/yyyy");
+}
+
+// isAddedMark and isSkippedMark read a lesson's Time Sheet note.
+function isAddedMark(mark) {
+  return /^added\b/i.test(String(mark || "").trim());
+}
+function isSkippedMark(mark) {
+  return /^skipped$/i.test(String(mark || "").trim());
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Phase 6 — dates
+// ──────────────────────────────────────────────────────────────────────
+
+// dateKeyFromLessonCell reads a Lesson Schedule date as year-month-day text ("2026-10-05"). It
+// takes a real date (read in the studio spreadsheet's time zone), "2026-10-05", or "10/5/2026".
+function dateKeyFromLessonCell(value, tz) {
+  if (value instanceof Date) return Utilities.formatDate(value, tz, "yyyy-MM-dd");
+  var text = String(value === null || value === undefined ? "" : value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return isValidDateKey(text) ? text : null;
+  return dateKeyFromSlashDate(text);
+}
+
+// dateKeyFromSlashDate reads text like "9/10/2026" (month/day/year) as "2026-09-10", or gives back
+// nothing (null) if it isn't a real date written that way.
+function dateKeyFromSlashDate(text) {
+  var m = /^\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s*$/.exec(String(text));
+  if (!m) return null;
+  return dateKeyFromParts(Number(m[3]), Number(m[1]), Number(m[2]));
+}
+
+// dateKeyFromParts builds "yyyy-MM-dd" from a year, month and day, or gives back nothing (null)
+// for an impossible date like February 30.
+function dateKeyFromParts(year, month, day) {
+  var check = new Date(Date.UTC(year, month - 1, day));
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) {
+    return null;
+  }
+  return year + "-" + (month < 10 ? "0" : "") + month + "-" + (day < 10 ? "0" : "") + day;
+}
+
+// isValidDateKey says whether text is a real date written year-month-day, like 2026-10-05.
+function isValidDateKey(text) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(text || ""));
+  return !!m && dateKeyFromParts(Number(m[1]), Number(m[2]), Number(m[3])) === text;
+}
+
+// displayDateFromKey turns "2026-10-05" into "10/5/2026", the way the time sheet shows dates.
+function displayDateFromKey(key) {
+  return Number(key.substring(5, 7)) + "/" + Number(key.substring(8, 10)) + "/" + key.substring(0, 4);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Phase 6 — authorize() report
+// ──────────────────────────────────────────────────────────────────────
+
+// checkTimesheetForAuthorize opens the time sheet (so Google's permission prompt covers it) and
+// writes plain-English report lines for the authorize() log: "OK ..." when a setting works, or
+// "PROBLEM ..." with what to do. It never stops authorize().
+function checkTimesheetForAuthorize() {
+  var lines = [];
+  var summary = { configured: false };
+  var props = PropertiesService.getScriptProperties();
+  var rawId = String(props.getProperty(TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY) || "").trim();
+  var rawStart = String(props.getProperty(TIMESHEET_START_DATE_PROPERTY_KEY) || "").trim();
+  var idOk = false;
+
+  if (!rawId) {
+    lines.push(
+      "PROBLEM " + TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + ": not set. Add it in Project " +
+      "Settings → Script Properties (the time sheet's ID or its whole web address)."
+    );
+  } else if (!spreadsheetIdFromSetting(rawId)) {
+    lines.push(
+      "PROBLEM " + TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + ": doesn't look like a Google Sheets ID or link."
+    );
+  } else {
+    var ts = null;
+    try {
+      ts = SpreadsheetApp.openById(spreadsheetIdFromSetting(rawId));
+    } catch (err) {
+      var me = effectiveUserEmail();
+      lines.push(
+        "PROBLEM " + TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + ": can't open it: share the time " +
+        "sheet as Editor with the Google account this script runs as" + (me ? " (" + me + ")" : "") + "."
+      );
+    }
+    if (ts) {
+      try {
+        var tz = ts.getSpreadsheetTimeZone();
+        var tabName = schoolYearTabName(Utilities.formatDate(new Date(), tz, "yyyy-MM-dd"));
+        var tabNote = "";
+        if (!findYearTab(ts, tabName)) {
+          var newest = newestYearTab(ts);
+          tabNote = newest
+            ? " (not there yet; it will be created just before " + newest.getName() + " on the first add)"
+            : " (not there yet, and there's no school-year tab to copy; add it by hand)";
+        }
+        lines.push(
+          "OK " + TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + ': "' + ts.getName() + '", tab ' + tabName + tabNote
+        );
+        var lists = readTimesheetLists(ts);
+        lines.push(
+          "Time sheet lists: Lesson No. " + lists.values.lessonNo.length + ", Block " +
+          lists.values.block.length + ", hours " + lists.values.hours.length + ", Instrument " +
+          lists.values.instrument.length +
+          (lists.missingTabs.length > 0 ? " (missing tabs: " + lists.missingTabs.join(", ") + ")" : "")
+        );
+        idOk = true;
+        summary = { configured: false, sheetTitle: ts.getName(), targetTab: tabName };
+      } catch (err) {
+        lines.push(
+          "PROBLEM " + TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + ": opened it, but couldn't read it (" +
+          String(err && err.message ? err.message : err) + ")."
+        );
+      }
+    }
+  }
+
+  if (!rawStart) {
+    lines.push(
+      "PROBLEM " + TIMESHEET_START_DATE_PROPERTY_KEY + ": not set. Add it in Project Settings → " +
+      "Script Properties, written like 2026-10-05."
+    );
+  } else if (!isValidDateKey(rawStart)) {
+    lines.push(
+      "PROBLEM " + TIMESHEET_START_DATE_PROPERTY_KEY + ': "' + rawStart + "\" isn't a date written like 2026-10-05."
+    );
+  } else {
+    lines.push("OK " + TIMESHEET_START_DATE_PROPERTY_KEY + ": " + rawStart);
+    summary.startDate = rawStart;
+    if (idOk) summary.configured = true;
+  }
+  return { lines: lines, summary: summary };
+}
+
+// effectiveUserEmail gives the email of the Google account this script is running as, or "" if
+// Google won't say.
+function effectiveUserEmail() {
+  try {
+    return String(Session.getEffectiveUser().getEmail() || "");
+  } catch (err) {
+    return "";
+  }
+}
+
 /**
  * Form-submit trigger. Buckets every new submission into a tab named
  * after the submitter's email so `?email=…` lookups are O(1).
@@ -2605,9 +4038,9 @@ var FMT_AUTO_COLUMN_TEXT = "#574d44";
  * Anything edited in these columns by hand will be overwritten on the
  * next create-event / cancel-event call, hence the warning.
  */
-// The Lesson Schedule columns the website fills in by itself (Status and Calendar Event ID).
-// They get a different look and a warning if someone tries to edit them by hand.
-var AUTO_MANAGED_LESSON_COLUMNS = ["Status", CALENDAR_EVENT_ID_COLUMN];
+// The Lesson Schedule columns the website fills in by itself (Status, Calendar Event ID, and
+// Time Sheet). They get a different look and a warning if someone tries to edit them by hand.
+var AUTO_MANAGED_LESSON_COLUMNS = ["Status", CALENDAR_EVENT_ID_COLUMN, TIME_SHEET_COLUMN];
 
 /** Note shown when the teacher hovers a header cell of an auto column. */
 // The note that pops up when the teacher hovers over the title of one of those columns.
@@ -2824,10 +4257,12 @@ function formatLessonRecapsSheet(sheet) {
  * is cosmetic and shouldn't block setup.
  */
 // formatLessonScheduleSheet styles the Lesson Schedule tab with the standard look, then marks
-// the website-managed columns (Status, Calendar Event ID) with muted colors and an edit warning.
+// the website-managed columns (Status, Calendar Event ID, Time Sheet) with muted colors and an
+// edit warning.
 function formatLessonScheduleSheet(sheet) {
-  // Make sure the Calendar Event ID column exists, then apply the standard look.
+  // Make sure the Calendar Event ID and Time Sheet columns exist, then apply the standard look.
   ensureCalendarEventIdColumn(sheet);
+  ensureAutoManagedColumn(sheet, TIME_SHEET_COLUMN);
   applyBaseTableFormat(sheet);
 
   // Read the column titles, then find and mark each website-managed column.
