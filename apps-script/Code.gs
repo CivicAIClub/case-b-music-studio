@@ -4,8 +4,8 @@
 // Drive by itself, so it sends requests here, and this script does the work and replies.
 // Reading (doGet) hands the website the student roster and lesson schedule from the Sheet.
 // Writing (doPost) books or cancels lessons on Google Calendar, sets up and shares Google Drive
-// folders, and saves the teacher's lesson recaps. Every request, read or write, must carry a
-// shared password.
+// folders, saves the teacher's lesson recaps, and adds each lesson he teaches to his payroll time
+// sheet (a separate Google Sheet). Every request, read or write, must carry a shared password.
 // onFormSubmit runs whenever a student fills in the sign-up Google Form. The website files that
 // talk to this script are src/api/appsScriptStudent.ts, appsScriptSchedule.ts, appsScriptPost.ts.
 // The long technical note below is for developers; plain-English notes like this run throughout.
@@ -27,6 +27,9 @@
  *        Student Email | Student Name | Lesson Date | Lesson Block |
  *        Start Time    | End Time     | Status      | Lesson Focus |
  *        Note          (or "Notes")
+ *      plus two columns the script adds and fills in itself (grayed out,
+ *      warning-protected): "Calendar Event ID" (Phase 2) and
+ *      "Time Sheet" (Phase 6: "Added 10/7/2026" or "Skipped").
  *  - One tab per student, named after their email — created automatically
  *    by `onFormSubmit` below. Old responses submitted *before* this
  *    trigger was installed will not have a per-email tab; run a one-time
@@ -112,7 +115,48 @@
  *      {"action":"list-recaps", "secret":"…"}
  *           → { ok, recaps: [...] }
  *
- *  Future POST actions (Phases 6+) will follow the same shape:
+ *    Phase 6 — Time sheet. Mr. O'Neal's payroll time sheet is a separate
+ *    Google Sheet: one tab per school year named exactly "2026-2027"
+ *    (newest first), "(CHAPEL/MISC.)" companion tabs, and lookup tabs
+ *    (Lesson No., Block, hours, Instrument) that feed its dropdowns. Two
+ *    Script Properties connect it (never put either value in the repo):
+ *      TIMESHEET_SPREADSHEET_ID = the time sheet's ID, or its whole URL
+ *      TIMESHEET_START_DATE     = first lesson date to offer, like
+ *                                 2026-10-07 (earlier lessons were typed
+ *                                 in by hand and are never offered)
+ *    Share the time sheet as Editor with the Google account the web app
+ *    runs as. The row actions use the Phase 2 composite key. The script
+ *    appends rows (columns A-G only, never H or I, never editing or
+ *    deleting a row), matches year tabs by exact name (never the CHAPEL
+ *    tabs), only reads the lookup tabs, and notes each lesson in the
+ *    Lesson Schedule's "Time Sheet" column.
+ *      {"action":"timesheet-status", "secret":"…"}
+ *           → { ok, configured, reason?, sheetUrl, sheetTitle, targetTab,
+ *                targetTabExists, startDate, codeVersion,
+ *                lists: { lessonNo, block, hours, instrument } }
+ *             (never fails for a setup problem: configured is false and
+ *             reason says what's missing, in plain words)
+ *      {"action":"preview-timesheet-row", "secret":"…", studentEmail,
+ *       lessonDate, startTime, overrides? }
+ *           → { ok, tab, createsTab, insertBefore, termLabel,
+ *                addsTermLabel, row: [A..G as shown], fields, duplicate,
+ *                warnings: [plain English], lists, mark, lesson,
+ *                sheetUrl, sheetTitle }        // writes nothing
+ *      {"action":"add-timesheet-row", "secret":"…", studentEmail,
+ *       lessonDate, startTime, overrides?: { lessonNo, firstName,
+ *       lastName, block, hours, subject } }
+ *           → { ok, tab, rowNumber, row, alreadyThere, createdTab,
+ *                labelRowNumber, mark }
+ *             Takes the script lock. If the same date + student is already
+ *             on the tab, nothing is appended and only the mark is written
+ *             (so a retry is safe). Creates the school-year tab if needed.
+ *      {"action":"skip-timesheet-row", "secret":"…", studentEmail,
+ *       lessonDate, startTime}
+ *           → { ok, skipped: true, mark: "Skipped" }  // time sheet untouched
+ *    "ping" also returns codeVersion (CODE_VERSION, near the top of the
+ *    Config section), and authorize() logs it on its first line.
+ *
+ *  Future POST actions (Phases 7+) will follow the same shape:
  *    { "action": "<name>", "secret": "…", ...payload }
  *
  * The frontend clients live in:
@@ -4022,8 +4066,8 @@ function grantClassResourcesViewerForStudent(studentEmail) {
 // One-time setup: open the Apps Script editor, select setupSheetFormatting,
 // and click Run. It styles every known tab (Form Responses 1, Lesson
 // Schedule, Lesson Recaps, every per-student tab) and applies warning-only
-// protection to the auto-managed columns ("Status", "Calendar Event ID")
-// on the Lesson Schedule tab.
+// protection to the auto-managed columns ("Status", "Calendar Event ID",
+// "Time Sheet") on the Lesson Schedule tab, adding the last two if missing.
 //
 // New per-student tabs created by `onFormSubmit` are styled at creation,
 // so the teacher only ever needs to run setupSheetFormatting() once after
