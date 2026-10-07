@@ -24,3 +24,7 @@ jobs:
           VITE_APPS_SCRIPT_BASE_URL: https://script.google.com/macros/s/PLACEHOLDER/exec
           VITE_APPS_SCRIPT_SHARED_SECRET: placeholder-not-a-real-secret
         run: npm run build
+      # The same website built for Google hosting: one self-contained dist-gas/Index.html,
+      # with no VITE_* values in it.
+      - name: Google-hosted page build (dist-gas/Index.html)
+        run: npm run build:gas

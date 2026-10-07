@@ -137,7 +137,7 @@ export function TimesheetSection({
         <div className="timesheet-card__header">
           <div>
             <h2 id="timesheet-h" className="card__title">
-              Time sheet
+              <span aria-hidden="true">🧾</span> Time sheet
             </h2>
             {status && status.startDate && toLog.length > 0 && (
               <p className="muted profile-updates-intro">

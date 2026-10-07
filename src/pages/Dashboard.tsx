@@ -277,7 +277,7 @@ export function Dashboard() {
       <div className="grid-dashboard">
         {/* Card: the total number of students, or "?" plus the error if loading failed. */}
         <section className="card card--stat dashboard-hero">
-          <span className="dashboard-hero__eyebrow">Total students</span>
+          <span className="dashboard-hero__eyebrow"><span aria-hidden="true">🎸</span> Total students</span>
           <p className="dashboard-hero__value">
             {loadError ? "?" : students.length}
           </p>
@@ -288,7 +288,7 @@ export function Dashboard() {
 
         {/* Card: a search box to jump straight to one student's profile. */}
         <section className="card">
-          <h2 className="card__title">Find a student</h2>
+          <h2 className="card__title"><span aria-hidden="true">🔎</span> Find a student</h2>
           <label className="label" htmlFor="dash-search">
             Search by name or email
           </label>
@@ -334,7 +334,7 @@ export function Dashboard() {
 
         {/* Card: "Recent student updates", what changed since this browser's last visit. */}
         <section className="card span-2">
-          <h2 className="card__title">Recent student updates</h2>
+          <h2 className="card__title"><span aria-hidden="true">🔔</span> Recent student updates</h2>
           <p className="muted profile-updates-intro">
             Changes since your last visit, saved per browser.
           </p>
@@ -444,7 +444,7 @@ export function Dashboard() {
 
         {/* Card: upcoming lessons, soonest first, each with a Cancel option. */}
         <section className="card span-2">
-          <h2 className="card__title">Upcoming lessons</h2>
+          <h2 className="card__title"><span aria-hidden="true">📅</span> Upcoming lessons</h2>
           <p className="muted profile-updates-intro">
             Scheduled or rescheduled lessons, today onward.
           </p>
@@ -492,7 +492,7 @@ export function Dashboard() {
           aria-labelledby="quick-links-h"
         >
           <h2 id="quick-links-h" className="card__title">
-            Quick links
+            <span aria-hidden="true">🔗</span> Quick links
           </h2>
           <p className="muted profile-updates-intro">
             Open the source spreadsheet or Google Form in a new tab.

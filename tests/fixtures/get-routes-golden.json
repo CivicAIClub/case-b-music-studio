@@ -1,0 +1,152 @@
+{
+  "list": {
+    "students": [
+      {
+        "Timestamp": "2026-08-20T13:00:00.000Z",
+        "Email Address": "avery.sample@example.org",
+        "Name": "Avery Sample",
+        "What instrument do you want to play?": "Electric guitar"
+      },
+      {
+        "Timestamp": "2026-08-20T13:00:00.000Z",
+        "Email Address": "jordan.test@example.org",
+        "Name": "Jordan Test",
+        "What instrument do you want to play?": "bass guitar"
+      },
+      {
+        "Timestamp": "2026-08-20T13:00:00.000Z",
+        "Email Address": "casey.demo@example.org",
+        "Name": "Casey Demo",
+        "What instrument do you want to play?": "Ukulele"
+      },
+      {
+        "Timestamp": "2026-08-20T13:00:00.000Z",
+        "Email Address": "riley.mock@example.org",
+        "Name": "Riley Mock",
+        "What instrument do you want to play?": "uke"
+      },
+      {
+        "Timestamp": "2026-08-20T13:00:00.000Z",
+        "Email Address": "morgan.fake@example.org",
+        "Name": "Morgan Ann Fake",
+        "What instrument do you want to play?": "Drums"
+      },
+      {
+        "Timestamp": "2026-08-20T13:00:00.000Z",
+        "Email Address": "quinn.placeholder@example.org",
+        "Name": "Quinn",
+        "What instrument do you want to play?": "guitar and bass"
+      }
+    ]
+  },
+  "student-with-own-tab": {
+    "Timestamp": "2026-09-02T18:05:00.000Z",
+    "Email Address": "avery.sample@example.org",
+    "Name": "Avery Sample",
+    "What instrument do you want to play?": "Bass"
+  },
+  "student-from-form-responses": {
+    "Timestamp": "2026-08-20T13:00:00.000Z",
+    "Email Address": "jordan.test@example.org",
+    "Name": "Jordan Test",
+    "What instrument do you want to play?": "bass guitar"
+  },
+  "student-email-in-capitals": {
+    "Timestamp": "2026-09-02T18:05:00.000Z",
+    "Email Address": "avery.sample@example.org",
+    "Name": "Avery Sample",
+    "What instrument do you want to play?": "Bass"
+  },
+  "student-unknown": {
+    "error": "Student not found"
+  },
+  "schedule-list": {
+    "rows": [
+      {
+        "Student Email": "avery.sample@example.org",
+        "Student Name": "Avery Sample",
+        "Lesson Date": "2026-10-15",
+        "Lesson Block": "Lunch",
+        "Start Time": "12:00 PM",
+        "End Time": "12:45 PM",
+        "Status": "",
+        "Lesson Focus": "",
+        "Note": "",
+        "Calendar Event ID": ""
+      },
+      {
+        "Student Email": "jordan.test@example.org",
+        "Student Name": "Jordan Test",
+        "Lesson Date": "2026-10-16",
+        "Lesson Block": "C Block",
+        "Start Time": "3:00 PM",
+        "End Time": "4:30 PM",
+        "Status": "Scheduled",
+        "Lesson Focus": "",
+        "Note": "",
+        "Calendar Event ID": ""
+      },
+      {
+        "Student Email": "casey.demo@example.org",
+        "Student Name": "Casey Demo",
+        "Lesson Date": "2026-10-19",
+        "Lesson Block": "D Block",
+        "Start Time": "8:00 AM",
+        "End Time": "8:45 AM",
+        "Status": "Cancelled",
+        "Lesson Focus": "",
+        "Note": "",
+        "Calendar Event ID": ""
+      },
+      {
+        "Student Email": "jordan.test@example.org",
+        "Student Name": "Jordan Test",
+        "Lesson Date": "2026-10-20T19:30:00.000Z",
+        "Lesson Block": "E Block",
+        "Start Time": "3:30 PM",
+        "End Time": "4:15 PM",
+        "Status": "",
+        "Lesson Focus": "",
+        "Note": "",
+        "Calendar Event ID": ""
+      }
+    ]
+  },
+  "schedule-one-student": {
+    "rows": [
+      {
+        "Student Email": "jordan.test@example.org",
+        "Student Name": "Jordan Test",
+        "Lesson Date": "2026-10-16",
+        "Lesson Block": "C Block",
+        "Start Time": "3:00 PM",
+        "End Time": "4:30 PM",
+        "Status": "Scheduled",
+        "Lesson Focus": "",
+        "Note": "",
+        "Calendar Event ID": ""
+      },
+      {
+        "Student Email": "jordan.test@example.org",
+        "Student Name": "Jordan Test",
+        "Lesson Date": "2026-10-20T19:30:00.000Z",
+        "Lesson Block": "E Block",
+        "Start Time": "3:30 PM",
+        "End Time": "4:15 PM",
+        "Status": "",
+        "Lesson Focus": "",
+        "Note": "",
+        "Calendar Event ID": ""
+      }
+    ]
+  },
+  "unknown-action": {
+    "error": "Missing email or invalid action. Use ?email=student@example.com, ?action=list, ?action=schedule-list, or ?action=schedule&email=student@example.com"
+  },
+  "no-secret": {
+    "error": "Unauthorized"
+  },
+  "wrong-secret": {
+    "error": "Unauthorized"
+  }
+}

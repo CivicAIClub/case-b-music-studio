@@ -136,6 +136,8 @@ export function keyOf(l) {
 //   timeSheetColumn     true to start the Lesson Schedule with a "Time Sheet" column
 //   formRows            replaces Form Responses 1's rows
 //   rejectInvalidScriptWrites  true makes "Reject input" dropdowns refuse script writes
+//   activeUser          the person using the script (default: the account it runs as)
+//   htmlFiles           HTML files in the Apps Script project (default: ["Index"])
 export function buildWorld(options = {}) {
   const { context, SandboxDate } = createSandbox({ now: options.now || "2026-10-20T20:00:00-04:00" });
 
@@ -171,6 +173,8 @@ export function buildWorld(options = {}) {
     active: studio,
     spreadsheets: { [TIMESHEET_ID]: ts },
     props: options.props || defaultProps(),
+    activeUser: options.activeUser,
+    htmlFiles: options.htmlFiles,
   });
   Object.assign(context, fakes.globals);
   loadCode(context);
@@ -184,6 +188,11 @@ export function buildWorld(options = {}) {
     fakes,
     logs: fakes.logs,
     timesheetTz,
+    // Calls api() like the Google-hosted page does (google.script.run), as the given visitor.
+    api(request, asUser) {
+      if (asUser !== undefined) fakes.setActiveUser(asUser);
+      return context.api(request);
+    },
     // Calls doPost like the website does and gives back the parsed reply.
     post(action, body = {}) {
       const out = context.doPost({ postData: { contents: JSON.stringify(Object.assign({ action, secret: SECRET }, body)) } });

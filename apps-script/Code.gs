@@ -5,9 +5,11 @@
 // Reading (doGet) hands the website the student roster and lesson schedule from the Sheet.
 // Writing (doPost) books or cancels lessons on Google Calendar, sets up and shares Google Drive
 // folders, saves the teacher's lesson recaps, and adds each lesson he teaches to his payroll time
-// sheet (a separate Google Sheet). Every request, read or write, must carry a shared password.
-// onFormSubmit runs whenever a student fills in the sign-up Google Form. The website files that
-// talk to this script are src/api/appsScriptStudent.ts, appsScriptSchedule.ts, appsScriptPost.ts.
+// sheet (a separate Google Sheet). Requests from the GitHub Pages website must carry a shared
+// password. The script can also serve the website itself (Google hosting): doGet with nothing on
+// the address sends the page, which then asks for everything through api(), open only to the
+// Pomfret accounts on the ALLOWED_USERS list. onFormSubmit runs whenever a student fills in the
+// sign-up Google Form. On the website, every request goes through src/api/appsScriptTransport.ts.
 // The long technical note below is for developers; plain-English notes like this run throughout.
 /**
  * Case B — Music Studio: Google Apps Script backend (Code.gs)
@@ -39,7 +41,10 @@
  * ───────────────────────────────────────────────────────────────────────
  * HTTP endpoints (one Web App, routed by query params or POST body)
  * ───────────────────────────────────────────────────────────────────────
- *  Every GET must include &secret=… (same SHARED_SECRET as POSTs);
+ *  GET  (nothing on the address)     → the website itself (Google hosting):
+ *       the HTML file "Index" (title "Music Studio"), only for emails on
+ *       ALLOWED_USERS; everyone else gets a short "no access" page.
+ *  Every other GET must include &secret=… (same SHARED_SECRET as POSTs);
  *  otherwise the reply is { error: "Unauthorized" }.
  *  GET  ?email=foo@bar.com           → latest row from that student's tab
  *  GET  ?action=list                 → { students: [...] }  every roster row
@@ -159,10 +164,27 @@
  *  Future POST actions (Phases 7+) will follow the same shape:
  *    { "action": "<name>", "secret": "…", ...payload }
  *
- * The frontend clients live in:
- *   src/api/appsScriptStudent.ts        (GET, roster + single student)
- *   src/api/appsScriptSchedule.ts       (GET, lesson schedule)
- *   src/api/appsScriptPost.ts           (POST, write actions — Phase 1+)
+ *  Google hosting — api(request), called by the Google-hosted page
+ *  through google.script.run (no shared secret on this path):
+ *    api({ action: "list" | "schedule-list" })            → same as the GET
+ *    api({ action: "student" | "schedule", email })       → same as the GET
+ *    api({ action: "<any POST action>", ...payload })     → same as doPost
+ *  Every call first checks Session.getActiveUser() against the
+ *  ALLOWED_USERS Script Property (comma-separated emails, any capitals);
+ *  a blank or unlisted email gets { ok: false, accessDenied: true,
+ *  error: "You don't have access to the Music Studio. Ask Mr. O'Neal." }.
+ *  Answers are JSON-safe (a JSON round trip turns Dates into the same
+ *  text the GET routes send). SAFETY RULE: a served page can call any
+ *  function whose name doesn't end in "_", so all but doGet, doPost, api,
+ *  authorize, setupSheetFormatting and onFormSubmit end in "_" (see the
+ *  note above api for how those six check their caller).
+ *
+ * The frontend: every request goes through callAppsScript in
+ *   src/api/appsScriptTransport.ts (google.script.run when served by
+ *   Google, otherwise web GET/POST with the secret), used by
+ *   src/api/appsScriptStudent.ts        (roster + single student)
+ *   src/api/appsScriptSchedule.ts       (lesson schedule)
+ *   src/api/appsScriptPost.ts           (write actions — Phase 1+)
  *
  * ───────────────────────────────────────────────────────────────────────
  * Auth (shared secret)
@@ -203,13 +225,20 @@
  * ───────────────────────────────────────────────────────────────────────
  * Deployment (Apps Script editor → Deploy → New deployment)
  * ───────────────────────────────────────────────────────────────────────
+ *  Google hosting (Pomfret sign-in; see docs/handoff.md):
+ *    Type:           Web app
+ *    Execute as:     Me
+ *    Who has access: Anyone within Pomfret School
+ *    Files:          Code.gs, plus the HTML file "Index" (npm run build:gas;
+ *                    scripts/copy-to-apps-script.sh page)
+ *  GitHub Pages (the older public deployment, until the handoff):
  *    Type:           Web app
  *    Execute as:     Me
  *    Who has access: Anyone
- *  Copy the resulting `/exec` URL into APPS_SCRIPT_BASE_URL inside
- *  src/api/appsScriptStudent.ts. After ANY change to Code.gs, redeploy
- *  via Deploy → Manage deployments → ✏️ → "New version" so the live
- *  /exec URL serves the new code.
+ *  Its `/exec` URL goes in VITE_APPS_SCRIPT_BASE_URL (.env.local and the
+ *  repo's Actions secrets). After ANY change to Code.gs, redeploy via
+ *  Deploy → Manage deployments → ✏️ → "New version" so that deployment
+ *  serves the new code; each deployment keeps its own version until then.
  */
 
 // ──────────────────────────────────────────────────────────────────────
@@ -219,7 +248,7 @@
 // Which version of this file is pasted into the Apps Script editor. Change it whenever Code.gs
 // changes. authorize() logs it on its first line and "ping" sends it back, so after a paste you
 // can confirm the live web app is running this exact version.
-var CODE_VERSION = "2026-10-06 phase 6 time sheet";
+var CODE_VERSION = "2026-10-07 google hosting";
 
 /** Property key under which the GET/POST shared secret is stored. */
 // SETTINGS. This section holds fixed settings the rest of the file relies on: tab names, who is
@@ -238,7 +267,7 @@ var LESSON_SCHEDULE_SHEET_NAME = "Lesson Schedule";
  * writes the Google Calendar event ID here after a successful create so
  * subsequent calls (cancel, future updates, recap-attach) can reference
  * the same event without scanning calendars by metadata. Auto-created
- * by `ensureCalendarEventIdColumn` if missing.
+ * by `ensureCalendarEventIdColumn_` if missing.
  */
 // The title of the extra column where the script writes each lesson's calendar event ID (a code
 // Google gives every calendar event), so it can find that exact event again later.
@@ -248,17 +277,14 @@ var CALENDAR_EVENT_ID_COLUMN = "Calendar Event ID";
  * Always invited to every auto-created lesson event. Mr. O'Neal owns
  * the calendar (the deployer of the web app), so he's already on every
  * event as the organizer — but he's listed here too so the dashboard's
- * "Attendees" preview shows him explicitly. Cayden's two emails are
- * here for ongoing maintenance visibility, and Dr. Burns is the
+ * "Attendees" preview shows him explicitly. Dr. Burns is the
  * always-CC'd music department contact.
  */
 // The people added as guests to every lesson the website puts on the calendar, in addition to
 // the student. Change this list to change who is always invited.
 var ALWAYS_INVITE_EMAILS = [
   "roneal@pomfret.org",
-  "rburns@pomfret.org",
-  "caydenauyang@gmail.com",
-  "cauyang.27@pomfret.org"
+  "rburns@pomfret.org"
 ];
 
 /**
@@ -311,7 +337,7 @@ var STUDENT_RESOURCES_PARENT_FOLDER_ID_PROPERTY_KEY = "STUDENT_RESOURCES_PARENT_
 /**
  * Per-student folder ID cache. Keys are
  * "STUDENT_FOLDER:<email>" → folder id. Populated lazily by
- * ensureStudentFolder, never edited by hand.
+ * ensureStudentFolder_, never edited by hand.
  */
 // Once a student's folder is made, its ID is remembered in the drawer under a label that starts
 // with this text followed by the student's email, so it can be found quickly next time.
@@ -435,26 +461,61 @@ var TIMESHEET_DOUBLE_MINUTES = 90;
 // The question on the sign-up form that says which instrument a student plays.
 var FORM_INSTRUMENT_QUESTION = "What instrument do you want to play?";
 
-// doGet answers "read" requests from the website: requests that only look at information and
-// never change anything. Google runs this automatically whenever someone opens this script's
-// web address. The website adds a note to the address saying what it wants (for example
-// "?action=list" for the roster). The answer goes back as JSON (a plain-text format for data
-// that both this script and the website understand). Read requests must carry the same shared
-// password as write requests (as "&secret=..." on the address), because they hand out student
-// emails and the lesson schedule.
+/**
+ * Google hosting. The website can also be served by this script itself (doGet with nothing on
+ * the address), deployed "Execute as: Me" and "Who has access: Anyone within Pomfret School".
+ * Every request from that page goes through api(), which checks the visitor's Pomfret email
+ * against the ALLOWED_USERS Script Property (comma-separated, capital letters don't matter).
+ */
+// The drawer-slot label for the list of people allowed to use the Google-hosted page.
+var ALLOWED_USERS_PROPERTY_KEY = "ALLOWED_USERS";
+
+// What anyone not on ALLOWED_USERS (or whose email Google won't share) is told.
+var NO_ACCESS_MESSAGE = "You don't have access to the Music Studio. Ask Mr. O'Neal.";
+
+// The HTML file in the Apps Script editor that holds the whole website (built by
+// `npm run build:gas`), and the title shown on the browser tab.
+var PAGE_FILE_NAME = "Index";
+var PAGE_TITLE = "Music Studio";
+
+// doGet runs whenever someone opens this script's web address. Google runs it automatically.
+//   - With no "action" and no "email" on the address, it is a person opening the website
+//     itself (Google hosting): it sends back the Music Studio page (the Index file), but only
+//     to someone on ALLOWED_USERS. Everyone else gets a short "no access" page with no data.
+//   - Otherwise it answers a "read" request from the GitHub Pages website, exactly as before:
+//     the website adds a note to the address saying what it wants (for example "?action=list"
+//     for the roster) plus the shared password ("&secret=..."), and the answer goes back as
+//     JSON (a plain-text format for data). Reads must carry the password because they hand out
+//     student emails and the lesson schedule.
 function doGet(e) {
-  // Check the shared password before reading anything. If it's missing or wrong, refuse. The
-  // reply uses the same { error: ... } shape the website already shows for failed reads.
   const params = (e && e.parameter) || {};
-  if (!isValidSecret(params.secret)) {
-    return jsonResponse({ error: "Unauthorized" });
+  const action = String(params.action || "").trim().toLowerCase();
+  const email = String(params.email || "").trim().toLowerCase();
+
+  // Nothing asked for: show the website itself.
+  if (!action && !email) {
+    return servePage_();
   }
 
-  // Open the studio spreadsheet and read what the website asked for: an "action" word and/or a
-  // student's email. Both are tidied up (extra spaces removed, lowercase) so they match reliably.
+  // Check the shared password before reading anything. If it's missing or wrong, refuse. The
+  // reply uses the same { error: ... } shape the website already shows for failed reads.
+  if (!isValidSecret_(params.secret)) {
+    return jsonResponse_({ error: "Unauthorized" });
+  }
+  return jsonResponse_(readRoute_(action, email));
+}
+
+// readRoute_ does the reading for doGet's four kinds of read request, and for the same requests
+// when they come from the Google-hosted page through api(). It is given the "action" word and the
+// student's email (both already lowercase) and gives back the answer as a plain bundle of data:
+//   ""              + email → one student's latest form answers
+//   "list"                  → { students: [...] }  every roster row
+//   "schedule-list"         → { rows: [...] }      every booked lesson
+//   "schedule"      + email → { rows: [...] }      one student's lessons
+// Anything else gets an { error: ... } explaining what may be asked for.
+function readRoute_(action, email) {
+  // Open the studio spreadsheet the script is attached to.
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const action = String(e.parameter.action || "").trim().toLowerCase();
-  const email = String(e.parameter.email || "").trim().toLowerCase();
 
   // 1) One student by email — latest row from that student's per-email tab.
   // Falls back to scanning Form Responses 1 when no per-email tab exists,
@@ -468,24 +529,24 @@ function doGet(e) {
       // Read everything on that tab. If there is nothing below the title row, say so.
       const data = sheet.getDataRange().getValues();
       if (data.length < 2) {
-        return jsonResponse({ error: "No data found for this student" });
+        return { error: "No data found for this student" };
       }
 
       // Row 1 holds the column titles; the last row is the student's most recent form answers.
       // Pair each answer with its title and send it back.
       const headers = data[0];
       const lastRow = data[data.length - 1];
-      return jsonResponse(rowToObject(headers, lastRow));
+      return rowToObject_(headers, lastRow);
     }
 
     // No personal tab? Fall back to the main form-answers tab and search it instead.
     const formSheet = ss.getSheetByName("Form Responses 1");
     if (!formSheet) {
-      return jsonResponse({ error: "Student not found" });
+      return { error: "Student not found" };
     }
     const formData = formSheet.getDataRange().getValues();
     if (formData.length < 2) {
-      return jsonResponse({ error: "Student not found" });
+      return { error: "Student not found" };
     }
     // Find which column holds the email addresses. If there is none, give up politely.
     const formHeaders = formData[0];
@@ -493,7 +554,7 @@ function doGet(e) {
       .map((h) => String(h).trim().toLowerCase())
       .indexOf("email address");
     if (emailColIndex === -1) {
-      return jsonResponse({ error: "Student not found" });
+      return { error: "Student not found" };
     }
     // Go down every row. Each time the email matches, remember that row, so by the end we hold the
     // student's latest submission (lower rows are newer).
@@ -506,9 +567,9 @@ function doGet(e) {
     }
     // If the student never appeared, say so; otherwise send back their latest answers.
     if (!latestRow) {
-      return jsonResponse({ error: "Student not found" });
+      return { error: "Student not found" };
     }
-    return jsonResponse(rowToObject(formHeaders, latestRow));
+    return rowToObject_(formHeaders, latestRow);
   }
 
   // 2) Student roster list — every row from "Form Responses 1".
@@ -516,13 +577,13 @@ function doGet(e) {
     // Open the form-answers tab, where every student sign-up lands.
     const formSheet = ss.getSheetByName("Form Responses 1");
     if (!formSheet) {
-      return jsonResponse({ error: 'Sheet "Form Responses 1" not found' });
+      return { error: 'Sheet "Form Responses 1" not found' };
     }
 
     // Read the whole tab. If only the title row is there, send back an empty roster.
     const data = formSheet.getDataRange().getValues();
     if (data.length < 2) {
-      return jsonResponse({ students: [] });
+      return { students: [] };
     }
 
     // Turn each row into a labeled record (column title and answer), and drop any row with no
@@ -531,10 +592,10 @@ function doGet(e) {
     const rows = data.slice(1);
 
     const students = rows
-      .map((row) => rowToObject(headers, row))
+      .map((row) => rowToObject_(headers, row))
       .filter((student) => String(student["Email Address"] || "").trim() !== "");
 
-    return jsonResponse({ students });
+    return { students };
   }
 
   // 3) All scheduled lessons.
@@ -542,22 +603,22 @@ function doGet(e) {
     // Open the Lesson Schedule tab the teacher keeps by hand.
     const sheet = ss.getSheetByName("Lesson Schedule");
     if (!sheet) {
-      return jsonResponse({ error: "Lesson Schedule sheet not found" });
+      return { error: "Lesson Schedule sheet not found" };
     }
 
     // Read every lesson. If only the title row is there, send back an empty list.
     const data = sheet.getDataRange().getValues();
     if (data.length < 2) {
-      return jsonResponse({ rows: [] });
+      return { rows: [] };
     }
 
     // Label each lesson row by column title and skip blank rows (rows with no student email).
     const headers = data[0];
     const rows = data.slice(1)
-      .map((row) => rowToObject(headers, row))
+      .map((row) => rowToObject_(headers, row))
       .filter((lesson) => String(lesson["Student Email"] || "").trim() !== "");
 
-    return jsonResponse({ rows });
+    return { rows };
   }
 
   // 4) One student's scheduled lessons.
@@ -565,29 +626,29 @@ function doGet(e) {
     // Same as above, but for just one student.
     const sheet = ss.getSheetByName("Lesson Schedule");
     if (!sheet) {
-      return jsonResponse({ error: "Lesson Schedule sheet not found" });
+      return { error: "Lesson Schedule sheet not found" };
     }
 
     const data = sheet.getDataRange().getValues();
     if (data.length < 2) {
-      return jsonResponse({ rows: [] });
+      return { rows: [] };
     }
 
     // Keep only the lessons whose email matches the student asked about.
     const headers = data[0];
     const rows = data.slice(1)
-      .map((row) => rowToObject(headers, row))
+      .map((row) => rowToObject_(headers, row))
       .filter((lesson) =>
         String(lesson["Student Email"] || "").trim().toLowerCase() === email
       );
 
-    return jsonResponse({ rows });
+    return { rows };
   }
 
   // The request didn't match any of the four kinds above, so explain what the website may ask for.
-  return jsonResponse({
+  return {
     error: "Missing email or invalid action. Use ?email=student@example.com, ?action=list, ?action=schedule-list, or ?action=schedule&email=student@example.com"
-  });
+  };
 }
 
 /**
@@ -603,10 +664,10 @@ function doGet(e) {
  * a real time component) keeps full ISO so the frontend can parse it as a
  * Date and format it with the viewer's locale.
  */
-// rowToObject turns one spreadsheet row into a labeled record, pairing each cell with the column
+// rowToObject_ turns one spreadsheet row into a labeled record, pairing each cell with the column
 // title above it (for example "Lesson Date" and its value). It is given the title row and one
 // data row, and gives back the labeled record. Along the way it fixes how dates and times look.
-function rowToObject(headers, row) {
+function rowToObject_(headers, row) {
   // Look up the spreadsheet's time zone so dates and times are read the way the teacher sees them.
   const ssTz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
   const obj = {};
@@ -637,9 +698,9 @@ function rowToObject(headers, row) {
   return obj;
 }
 
-// jsonResponse packages any answer as JSON (plain-text data) so the website can read it.
+// jsonResponse_ packages any answer as JSON (plain-text data) so the website can read it.
 // It is given the answer and gives back a reply that Google sends to the website.
-function jsonResponse(data) {
+function jsonResponse_(data) {
   return ContentService
     .createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
@@ -666,69 +727,234 @@ function doPost(e) {
   // Unpack the request. If it's garbled or empty, reply with an error and stop.
   var payload;
   try {
-    payload = parsePostPayload(e);
+    payload = parsePostPayload_(e);
   } catch (err) {
-    return jsonResponse({ ok: false, error: "Invalid request body: " + err.message });
+    return jsonResponse_({ ok: false, error: "Invalid request body: " + err.message });
   }
 
   // Check the shared password. If it's missing or wrong, refuse the request.
-  if (!isValidSecret(payload && payload.secret)) {
-    return jsonResponse({ ok: false, error: "Unauthorized" });
+  if (!isValidSecret_(payload && payload.secret)) {
+    return jsonResponse_({ ok: false, error: "Unauthorized" });
   }
 
   // Read which job the website wants done (the "action"). Without one, there is nothing to do.
   var action = String((payload && payload.action) || "").trim().toLowerCase();
   if (!action) {
-    return jsonResponse({ ok: false, error: "Missing 'action' in request body" });
+    return jsonResponse_({ ok: false, error: "Missing 'action' in request body" });
   }
 
-  // Hand the request to the matching job. Each "case" below is one job name the website can ask
-  // for, and the function next to it does that job.
+  // Hand the request to the matching job (runPostAction_, below). If a job ran into a problem,
+  // send its message back so the teacher sees what went wrong.
   try {
-    switch (action) {
-      case "ping":
-        return jsonResponse(handlePing(payload));
-      case "preview-event":
-        return jsonResponse(handlePreviewEvent(payload));
-      case "create-event":
-        return jsonResponse(handleCreateEvent(payload));
-      case "cancel-event":
-        return jsonResponse(handleCancelEvent(payload));
-      case "list-class-resources":
-        return jsonResponse(handleListClassResources(payload));
-      case "sync-class-resources-access":
-        return jsonResponse(handleSyncClassResourcesAccess(payload));
-      case "list-student-folder":
-        return jsonResponse(handleListStudentFolder(payload));
-      case "ensure-student-folder":
-        return jsonResponse(handleEnsureStudentFolder(payload));
-      case "sync-student-folders":
-        return jsonResponse(handleSyncStudentFolders(payload));
-      case "get-lesson-recap":
-        return jsonResponse(handleGetLessonRecap(payload));
-      case "save-lesson-recap":
-        return jsonResponse(handleSaveLessonRecap(payload));
-      case "list-recaps-for-student":
-        return jsonResponse(handleListRecapsForStudent(payload));
-      case "list-recaps":
-        return jsonResponse(handleListRecaps(payload));
-      case "timesheet-status":
-        return jsonResponse(handleTimesheetStatus(payload));
-      case "preview-timesheet-row":
-        return jsonResponse(handlePreviewTimesheetRow(payload));
-      case "add-timesheet-row":
-        return jsonResponse(handleAddTimesheetRow(payload));
-      case "skip-timesheet-row":
-        return jsonResponse(handleSkipTimesheetRow(payload));
-      default:
-        return jsonResponse({ ok: false, error: "Unknown action: " + action });
-    }
+    return jsonResponse_(runPostAction_(action, payload));
   } catch (err) {
-    // If a job ran into a problem, send its message back so the teacher sees what went wrong.
-    return jsonResponse({
+    return jsonResponse_({
       ok: false,
       error: err && err.message ? err.message : "Action handler threw an unexpected error"
     });
+  }
+}
+
+// runPostAction_ does one "write" job, for doPost (the GitHub Pages website, with the shared
+// password) and for api() (the Google-hosted page, signed in). Each "case" below is one job name
+// the website can ask for, and the function next to it does that job. It gives back that job's
+// answer, or stops with an error the caller turns into { ok: false, error }.
+function runPostAction_(action, payload) {
+  switch (action) {
+    case "ping":
+      return handlePing_(payload);
+    case "preview-event":
+      return handlePreviewEvent_(payload);
+    case "create-event":
+      return handleCreateEvent_(payload);
+    case "cancel-event":
+      return handleCancelEvent_(payload);
+    case "list-class-resources":
+      return handleListClassResources_(payload);
+    case "sync-class-resources-access":
+      return handleSyncClassResourcesAccess_(payload);
+    case "list-student-folder":
+      return handleListStudentFolder_(payload);
+    case "ensure-student-folder":
+      return handleEnsureStudentFolder_(payload);
+    case "sync-student-folders":
+      return handleSyncStudentFolders_(payload);
+    case "get-lesson-recap":
+      return handleGetLessonRecap_(payload);
+    case "save-lesson-recap":
+      return handleSaveLessonRecap_(payload);
+    case "list-recaps-for-student":
+      return handleListRecapsForStudent_(payload);
+    case "list-recaps":
+      return handleListRecaps_(payload);
+    case "timesheet-status":
+      return handleTimesheetStatus_(payload);
+    case "preview-timesheet-row":
+      return handlePreviewTimesheetRow_(payload);
+    case "add-timesheet-row":
+      return handleAddTimesheetRow_(payload);
+    case "skip-timesheet-row":
+      return handleSkipTimesheetRow_(payload);
+    default:
+      return { ok: false, error: "Unknown action: " + action };
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Google hosting: the page and its one way in (api)
+// ──────────────────────────────────────────────────────────────────────
+
+// SAFETY RULE (the same one Case A's AutoPlanner follows): a page served by Apps Script can call
+// ANY function in this file whose name does not end in "_", through google.script.run. So every
+// function here ends in "_" except the few that must be reachable, and each of those checks who
+// is calling:
+//   - api:                        the page's only way in; checks ALLOWED_USERS on every call
+//   - doGet, doPost:              web addresses; reads and writes need the shared password
+//   - authorize,
+//     setupSheetFormatting:       run by a person from the editor (requireEditorRun_)
+//   - onFormSubmit:               only runs from its real form-submit trigger
+// Never add a new function without "_" unless it checks its caller like these do.
+
+/**
+ * The Google-hosted page calls this through google.script.run:
+ *   google.script.run.withSuccessHandler(...).api({ action: "list" })
+ * Read requests: "list", "student" (+ email), "schedule-list", "schedule" (+ email), answered
+ * exactly like the matching GET routes. Every other action is a POST action, answered exactly
+ * like doPost. No shared password on this path: Google has signed the visitor in, and only
+ * people on ALLOWED_USERS get past the first line.
+ */
+// api is the Google-hosted website's one way into this script. It is given a bundle like
+// { action: "list" } or { action: "add-timesheet-row", studentEmail, lessonDate, startTime }.
+// First it checks the signed-in visitor is on ALLOWED_USERS; if not, it answers only with the
+// "no access" message. Otherwise it does the same job the GitHub Pages website's requests do,
+// and gives back the same answer, made safe for google.script.run (no Date objects).
+function api(request) {
+  // Only people on ALLOWED_USERS, checked on every single call.
+  if (!isAllowedUser_(currentUserEmail_())) {
+    return { ok: false, accessDenied: true, error: NO_ACCESS_MESSAGE };
+  }
+
+  var req = request && typeof request === "object" && !Array.isArray(request) ? request : {};
+  var action = String(req.action || "").trim().toLowerCase();
+  var email = String(req.email || "").trim().toLowerCase();
+  var result;
+  try {
+    if (action === "student") {
+      // One student's latest form answers: the GET route with only an email.
+      result = readRoute_("", email);
+    } else if (action === "list" || action === "schedule-list" || action === "schedule") {
+      result = readRoute_(action, email);
+    } else if (!action) {
+      result = { ok: false, error: "Missing 'action' in request" };
+    } else {
+      result = runPostAction_(action, req);
+    }
+  } catch (err) {
+    result = {
+      ok: false,
+      error: err && err.message ? err.message : "Action handler threw an unexpected error"
+    };
+  }
+  // google.script.run can't carry Date objects. Turning the answer into JSON text and back
+  // changes every Date into the same text the GET routes send (and drops empty values), so both
+  // websites see exactly the same data.
+  return JSON.parse(JSON.stringify(result));
+}
+
+// servePage_ sends back the website itself (the Index HTML file) to someone on ALLOWED_USERS,
+// with the "Music Studio" title and the tag that makes it fit phone screens. Anyone else gets a
+// short page that says they don't have access, with no data in it.
+function servePage_() {
+  var email = currentUserEmail_();
+  if (!isAllowedUser_(email)) return notAuthorizedPage_(email);
+  try {
+    return HtmlService.createHtmlOutputFromFile(PAGE_FILE_NAME)
+      .setTitle(PAGE_TITLE)
+      .addMetaTag("viewport", "width=device-width, initial-scale=1");
+  } catch (err) {
+    // The Index file hasn't been pasted into the editor yet (or has another name).
+    return HtmlService.createHtmlOutput(
+      "<p>The Music Studio page file is missing. In the Apps Script editor, add an HTML file " +
+      "named <b>" + PAGE_FILE_NAME + "</b> (from <code>scripts/copy-to-apps-script.sh page</code>), " +
+      "save, and deploy a new version.</p>"
+    ).setTitle(PAGE_TITLE);
+  }
+}
+
+// notAuthorizedPage_ is the page for anyone not on ALLOWED_USERS: the "no access" message and
+// which Google account they are signed in with. It shows no data and offers no buttons.
+function notAuthorizedPage_(email) {
+  var who = email
+    ? '<p class="who">Signed in as <strong>' + escapeHtml_(email) + "</strong></p>"
+    : '<p class="who">Google didn\'t tell the Music Studio which account you are signed in with.</p>';
+  var html =
+    '<!DOCTYPE html><html lang="en"><head><base target="_top"><meta charset="UTF-8">' +
+    "<style>" +
+    "body{margin:0;background:#f6f1ec;color:#1a1411;font-family:Inter,system-ui,-apple-system," +
+    '"Segoe UI",Roboto,Helvetica,Arial,sans-serif}' +
+    'header{background:#7a142f;color:#fff;padding:18px 24px;font-family:"Crimson Pro",Georgia,serif;' +
+    "font-size:22px;font-weight:600}" +
+    "main{max-width:560px;margin:48px auto;padding:0 24px}" +
+    'h1{font-family:"Crimson Pro",Georgia,serif;font-size:30px;margin:0 0 12px}' +
+    "p{line-height:1.5;margin:0 0 12px}.who{color:#6b6157;font-size:14px}" +
+    "</style></head><body>" +
+    "<header>Pomfret School · Music Studio</header>" +
+    "<main><h1>No access</h1><p>" + escapeHtml_(NO_ACCESS_MESSAGE) + "</p>" + who +
+    '<p class="who">Signed in to more than one Google account? Open the Music Studio in a ' +
+    "browser window signed in only to your Pomfret account.</p></main></body></html>";
+  return HtmlService.createHtmlOutput(html)
+    .setTitle(PAGE_TITLE)
+    .addMetaTag("viewport", "width=device-width, initial-scale=1");
+}
+
+// escapeHtml_ makes text safe to put inside a page (so an email can't be read as HTML).
+function escapeHtml_(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// currentUserEmail_ gives the email of the person using the page right now (lowercase), or ""
+// if Google won't say. With "Execute as: Me" and "Anyone within Pomfret School", Google shares
+// the visitor's Pomfret email with the script.
+function currentUserEmail_() {
+  var email = "";
+  try {
+    email = Session.getActiveUser().getEmail();
+  } catch (err) {
+    email = "";
+  }
+  return String(email || "").trim().toLowerCase();
+}
+
+// allowedUsers_ reads ALLOWED_USERS from the settings drawer: a comma-separated list of emails,
+// tidied to lowercase with blanks removed.
+function allowedUsers_() {
+  var raw = PropertiesService.getScriptProperties().getProperty(ALLOWED_USERS_PROPERTY_KEY);
+  return String(raw || "")
+    .split(",")
+    .map(function (s) { return s.trim().toLowerCase(); })
+    .filter(function (s) { return s !== ""; });
+}
+
+// isAllowedUser_ says whether an email is on ALLOWED_USERS. A blank email never is.
+function isAllowedUser_(email) {
+  var clean = String(email || "").trim().toLowerCase();
+  return clean !== "" && allowedUsers_().indexOf(clean) !== -1;
+}
+
+// requireEditorRun_ stops a setup function (authorize, setupSheetFormatting) unless a person is
+// running it from the Apps Script editor: then the person using it and the account it runs as
+// are the same. A visitor of the web page calling it through google.script.run is a different
+// person from the account the web app runs as, so they are refused.
+function requireEditorRun_(name) {
+  var active = currentUserEmail_();
+  var effective = effectiveUserEmail_().trim().toLowerCase();
+  if (!active || active !== effective) {
+    throw new Error(name + " can only be run from the Apps Script editor.");
   }
 }
 
@@ -738,10 +964,10 @@ function doPost(e) {
  * so we tolerate text/plain (preferred, no CORS preflight) and
  * application/json equally.
  */
-// parsePostPayload opens up the request the website sent and turns its text into usable data.
+// parsePostPayload_ opens up the request the website sent and turns its text into usable data.
 // It is given the raw request and gives back the data inside it, or stops with an error if the
 // request is empty, garbled, or not the expected kind of data.
-function parsePostPayload(e) {
+function parsePostPayload_(e) {
   // Make sure the request actually has a message inside it.
   if (!e || !e.postData || typeof e.postData.contents !== "string") {
     throw new Error("Empty body");
@@ -769,12 +995,12 @@ function parsePostPayload(e) {
  * Properties. Returns false (not throws) on any mismatch so the response
  * shape stays uniform.
  */
-// isValidSecret checks the password the website sent against the real one kept in the drawer.
+// isValidSecret_ checks the password the website sent against the real one kept in the drawer.
 // It is given the password that came with the request and gives back yes (true) or no (false).
-function isValidSecret(candidate) {
+function isValidSecret_(candidate) {
   // No password sent, no real password set up yet, or the wrong length: the answer is no.
   if (typeof candidate !== "string" || !candidate) return false;
-  var expected = getSharedSecret();
+  var expected = getSharedSecret_();
   if (!expected) return false;
   if (candidate.length !== expected.length) return false;
   // Compare every character. It deliberately checks all of them, even after finding a mismatch,
@@ -786,9 +1012,9 @@ function isValidSecret(candidate) {
   return diff === 0;
 }
 
-// getSharedSecret fetches the real shared password from the script's settings drawer (Script
+// getSharedSecret_ fetches the real shared password from the script's settings drawer (Script
 // Properties). It gives back an empty value if none has been set.
-function getSharedSecret() {
+function getSharedSecret_() {
   var props = PropertiesService.getScriptProperties();
   return props.getProperty(SHARED_SECRET_PROPERTY_KEY) || "";
 }
@@ -800,10 +1026,10 @@ function getSharedSecret() {
  * Safe to invoke directly from the Apps Script editor's Run button
  * (no arguments) — the payload is treated as optional.
  */
-// handlePing is a simple "are you there?" test. It changes nothing and just replies "pong", with
+// handlePing_ is a simple "are you there?" test. It changes nothing and just replies "pong", with
 // the current time, the spreadsheet's name, and CODE_VERSION, so a developer can confirm the
 // website and this script are connected, the password works, and which version is live.
-function handlePing(payload) {
+function handlePing_(payload) {
   // If the test included a short message, send it straight back (an "echo").
   var message = payload && typeof payload.message === "string"
     ? payload.message
@@ -828,13 +1054,13 @@ function handlePing(payload) {
  * touch the calendar. Used to populate the "preview before create"
  * modal on the Dashboard.
  */
-// handlePreviewEvent shows the teacher what a calendar event WOULD look like before it is made.
+// handlePreviewEvent_ shows the teacher what a calendar event WOULD look like before it is made.
 // It is given which lesson (student email, date, start time) and gives back the proposed title,
 // times, guest list, and description. Nothing is put on the calendar here.
-function handlePreviewEvent(payload) {
+function handlePreviewEvent_(payload) {
   // Find that lesson's row in the Lesson Schedule tab, then draft the event from it.
-  var found = findLessonRowFromPayload(payload);
-  return { ok: true, preview: buildEventPreview(found.row) };
+  var found = findLessonRowFromPayload_(payload);
+  return { ok: true, preview: buildEventPreview_(found.row) };
 }
 
 /**
@@ -847,10 +1073,10 @@ function handlePreviewEvent(payload) {
  * disables the "Create event" button when `alreadyScheduled` is true,
  * but a stale UI tab could still POST again — this guard catches that.
  */
-// handleCreateEvent puts a lesson on the teacher's Google Calendar and emails invitations.
+// handleCreateEvent_ puts a lesson on the teacher's Google Calendar and emails invitations.
 // It is given which lesson (student email, date, start time) and gives back the new event's ID
-// and a link to it. The real work happens in createEventLocked, just below.
-function handleCreateEvent(payload) {
+// and a link to it. The real work happens in createEventLocked_, just below.
+function handleCreateEvent_(payload) {
   // Serialize concurrent creates against the same script. Without this, a
   // double-click on the modal Confirm button (or two browser tabs open on
   // the same lesson) both pass the existingId guard below and end up
@@ -868,18 +1094,18 @@ function handleCreateEvent(payload) {
   // Do the booking while holding the lock, and always hand the key back afterward, even if
   // something went wrong.
   try {
-    return createEventLocked(payload);
+    return createEventLocked_(payload);
   } finally {
     lock.releaseLock();
   }
 }
 
-// createEventLocked does the actual booking, and only runs while the lock above is held.
+// createEventLocked_ does the actual booking, and only runs while the lock above is held.
 // It finds the lesson row, checks it hasn't already been booked, creates the calendar event,
 // and records the event's ID and a "Scheduled" status back in the Sheet.
-function createEventLocked(payload) {
+function createEventLocked_(payload) {
   // Find the lesson row and note which columns to write the event ID and status into.
-  var found = findLessonRowFromPayload(payload);
+  var found = findLessonRowFromPayload_(payload);
   var sheet = found.sheet;
   var rowIndex = found.rowIndex;
   var row = found.row;
@@ -887,32 +1113,32 @@ function createEventLocked(payload) {
   var statusCol = found.statusCol;            // 1-indexed or null
 
   // Idempotency guard. Re-reads the row inside the lock so a concurrent
-  // create that finished between findLessonRowFromPayload and here is
+  // create that finished between findLessonRowFromPayload_ and here is
   // observed. Without this re-read, a double-click could still create
   // two events if the second request's snapshot is older than the
   // first request's commit.
   // In plain terms: read the row again, fresh, in case another request booked it moments ago.
   var freshRow = sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()).getValues()[0];
   var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  var freshRowObj = rowToObject(headers, freshRow);
+  var freshRowObj = rowToObject_(headers, freshRow);
   var existingId = String(freshRowObj[CALENDAR_EVENT_ID_COLUMN] || "").trim();
   // Already booked? Don't make a second event. Just send back the existing event's details.
   if (existingId) {
-    var existingEvent = safeGetEvent(existingId);
+    var existingEvent = safeGetEvent_(existingId);
     return {
       ok: true,
       alreadyScheduled: true,
       calendarEventId: existingId,
-      eventLink: existingEvent ? eventEditUrl(existingEvent) : null,
-      preview: buildEventPreview(freshRowObj)
+      eventLink: existingEvent ? eventEditUrl_(existingEvent) : null,
+      preview: buildEventPreview_(freshRowObj)
     };
   }
 
   // Draft the event. If the teacher edited the guest list in the preview window, use that list;
   // otherwise use the standard list (the student plus the always-invited people). The event goes
   // on the main calendar of the Google account that runs this script (the teacher's calendar).
-  var preview = buildEventPreview(row);
-  var attendeesOverride = normalizeAttendeesOverride(payload);
+  var preview = buildEventPreview_(row);
+  var attendeesOverride = normalizeAttendeesOverride_(payload);
   var guestsList = attendeesOverride || preview.attendees;
   var calendar = CalendarApp.getDefaultCalendar();
 
@@ -944,7 +1170,7 @@ function createEventLocked(payload) {
     ok: true,
     alreadyScheduled: false,
     calendarEventId: eventId,
-    eventLink: eventEditUrl(event)
+    eventLink: eventEditUrl_(event)
   };
 }
 
@@ -954,12 +1180,12 @@ function createEventLocked(payload) {
  * cancelled — calling cancel on a row that was never scheduled is a
  * clean no-op and leaves Status untouched. Does not delete the sheet row.
  */
-// handleCancelEvent takes a lesson off Google Calendar. It is given which lesson (student email,
+// handleCancelEvent_ takes a lesson off Google Calendar. It is given which lesson (student email,
 // date, start time). It deletes the event, clears the saved event ID, and marks the lesson
 // "Cancelled". The lesson row itself stays in the Sheet.
 // Like booking, it takes the lock first, so a cancel and a booking for the same lesson can't
 // run at the same moment and leave the Sheet and the calendar disagreeing.
-function handleCancelEvent(payload) {
+function handleCancelEvent_(payload) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(30 * 1000)) {
     throw new Error(
@@ -968,18 +1194,18 @@ function handleCancelEvent(payload) {
   }
   // Do the cancel while holding the lock, and always hand the key back afterward.
   try {
-    return cancelEventLocked(payload);
+    return cancelEventLocked_(payload);
   } finally {
     lock.releaseLock();
   }
 }
 
-// cancelEventLocked does the actual cancelling, and only runs while the lock above is held.
+// cancelEventLocked_ does the actual cancelling, and only runs while the lock above is held.
 // Because the row is looked up inside the lock, it always sees the Sheet as it is right now,
 // including a booking that finished a moment ago.
-function cancelEventLocked(payload) {
+function cancelEventLocked_(payload) {
   // Find the lesson row and the columns we may need to update.
-  var found = findLessonRowFromPayload(payload);
+  var found = findLessonRowFromPayload_(payload);
   var sheet = found.sheet;
   var rowIndex = found.rowIndex;
   var row = found.row;
@@ -994,7 +1220,7 @@ function cancelEventLocked(payload) {
 
   // Find the event on the calendar and delete it. If someone already deleted it by hand in
   // Google Calendar, skip this step quietly.
-  var existing = safeGetEvent(existingId);
+  var existing = safeGetEvent_(existingId);
   if (existing) existing.deleteEvent();
 
   // Clear the saved event ID, mark the lesson "Cancelled", and save the Sheet right away.
@@ -1020,8 +1246,15 @@ function cancelEventLocked(payload) {
 // each Google service once so all the permission pop-ups appear together, and writes a short
 // report to the log showing whether each piece is set up correctly.
 function authorize() {
+  // Only a person running it from the editor (see the SAFETY RULE above api).
+  requireEditorRun_("authorize");
+
   // First line of the log: which version of this file is running, so a paste can be confirmed.
   Logger.log("Code version: " + CODE_VERSION);
+  // Second line: which Google account this run uses. A web app deployed with "Execute as: Me"
+  // runs as the account that deployed it.
+  var runsAs = effectiveUserEmail_();
+  Logger.log("Runs as:                  " + (runsAs || "(Google didn't say)"));
 
   // Touch each service so Apps Script knows it must request the
   // corresponding OAuth scope. Logger output is purely informational.
@@ -1036,10 +1269,10 @@ function authorize() {
   var props = PropertiesService.getScriptProperties();
 
   // Look up the two configured Drive folders by name, so a wrong folder ID shows up here clearly.
-  var classResourcesName = resolveFolderNameForAuthorize(
+  var classResourcesName = resolveFolderNameForAuthorize_(
     props.getProperty(CLASS_RESOURCES_FOLDER_ID_PROPERTY_KEY)
   );
-  var studentResourcesParentName = resolveFolderNameForAuthorize(
+  var studentResourcesParentName = resolveFolderNameForAuthorize_(
     props.getProperty(STUDENT_RESOURCES_PARENT_FOLDER_ID_PROPERTY_KEY)
   );
 
@@ -1050,9 +1283,19 @@ function authorize() {
   Logger.log("Class Resources:          " + classResourcesName);
   Logger.log("Student Resources parent: " + studentResourcesParentName);
 
+  // Google hosting: who may use the Google-hosted page.
+  var allowed = allowedUsers_();
+  Logger.log(
+    allowed.length > 0
+      ? "OK " + ALLOWED_USERS_PROPERTY_KEY + ": " + allowed.length +
+        (allowed.length === 1 ? " person: " : " people: ") + allowed.join(", ")
+      : "PROBLEM " + ALLOWED_USERS_PROPERTY_KEY + ": empty, so nobody can use the Google-hosted " +
+        "page. Add Pomfret emails, separated by commas, in Project Settings → Script Properties."
+  );
+
   // Phase 6: open the time sheet too (so the permission prompt covers it) and report, in plain
   // words, whether both time sheet settings are ready. A problem here never stops authorize().
-  var timesheet = checkTimesheetForAuthorize();
+  var timesheet = checkTimesheetForAuthorize_();
   timesheet.lines.forEach(function (line) {
     Logger.log(line);
   });
@@ -1064,6 +1307,8 @@ function authorize() {
   return {
     ok: true,
     codeVersion: CODE_VERSION,
+    runsAs: runsAs,
+    allowedUsers: allowed,
     spreadsheet: ssName,
     calendar: calName,
     driveRoot: rootName,
@@ -1078,9 +1323,9 @@ function authorize() {
  * human-readable name for the execution log. Never throws; surfaces
  * any Drive error inline so the teacher sees what to fix.
  */
-// resolveFolderNameForAuthorize turns a folder ID into the folder's name for the report above.
+// resolveFolderNameForAuthorize_ turns a folder ID into the folder's name for the report above.
 // It says "(not configured)" if no ID was set, or shows Google's error if the ID doesn't work.
-function resolveFolderNameForAuthorize(folderId) {
+function resolveFolderNameForAuthorize_(folderId) {
   if (!folderId) return "(not configured)";
   try {
     return DriveApp.getFolderById(folderId).getName();
@@ -1102,12 +1347,12 @@ function resolveFolderNameForAuthorize(folderId) {
  * when the sheet is missing, the row isn't found, the key matches more
  * than one row, or the key is bad.
  */
-// findLessonRowFromPayload finds one lesson in the Lesson Schedule tab. A lesson is identified by
+// findLessonRowFromPayload_ finds one lesson in the Lesson Schedule tab. A lesson is identified by
 // three things together: the student's email, the lesson date, and the start time. It gives back
 // the tab, the row number, the row's contents, and which columns hold the event ID and status.
 // If the lesson can't be found, or more than one row matches, it stops with a message the teacher
 // will see on the website.
-function findLessonRowFromPayload(payload) {
+function findLessonRowFromPayload_(payload) {
   // Pull the three identifying details out of the request and tidy them up.
   var studentEmail = String((payload && payload.studentEmail) || "")
     .trim()
@@ -1128,7 +1373,7 @@ function findLessonRowFromPayload(payload) {
   }
 
   // Make sure the "Calendar Event ID" column exists (it's added automatically the first time).
-  ensureCalendarEventIdColumn(sheet);
+  ensureCalendarEventIdColumn_(sheet);
 
   // Read the whole tab. Row 1 holds the column titles.
   var data = sheet.getDataRange().getValues();
@@ -1136,11 +1381,11 @@ function findLessonRowFromPayload(payload) {
   var headers = data[0];
 
   // Work out which column is which by its title, so the teacher can reorder columns safely.
-  var emailCol = headerIndex(headers, "Student Email");
-  var dateCol = headerIndex(headers, "Lesson Date");
-  var startCol = headerIndex(headers, "Start Time");
-  var statusCol = headerIndex(headers, "Status");
-  var eventIdCol = headerIndex(headers, CALENDAR_EVENT_ID_COLUMN);
+  var emailCol = headerIndex_(headers, "Student Email");
+  var dateCol = headerIndex_(headers, "Lesson Date");
+  var startCol = headerIndex_(headers, "Start Time");
+  var statusCol = headerIndex_(headers, "Status");
+  var eventIdCol = headerIndex_(headers, CALENDAR_EVENT_ID_COLUMN);
 
   // If a required column is missing, stop with a message naming it.
   if (emailCol === -1) throw new Error('Column "Student Email" not found');
@@ -1160,10 +1405,10 @@ function findLessonRowFromPayload(payload) {
     var rowEmail = String(data[r][emailCol] || "").trim().toLowerCase();
     if (rowEmail !== studentEmail) continue;
 
-    var rowDate = normalizeSheetDate(data[r][dateCol], ssTz);
+    var rowDate = normalizeSheetDate_(data[r][dateCol], ssTz);
     if (rowDate !== lessonDate) continue;
 
-    var rowStart = normalizeSheetTime(data[r][startCol], ssTz);
+    var rowStart = normalizeSheetTime_(data[r][startCol], ssTz);
     if (rowStart !== startTime) continue;
 
     matchRowIndexes.push(r + 1); // sheet rows are 1-indexed
@@ -1191,7 +1436,7 @@ function findLessonRowFromPayload(payload) {
 
   // Found it: send back the row as a labeled record plus where it lives in the Sheet.
   // (Sheet rows and columns count from 1, while the code counts from 0, hence the "+ 1".)
-  var rowObj = rowToObject(headers, data[matchRowIndex - 1]);
+  var rowObj = rowToObject_(headers, data[matchRowIndex - 1]);
   return {
     sheet: sheet,
     rowIndex: matchRowIndex,
@@ -1207,17 +1452,17 @@ function findLessonRowFromPayload(payload) {
  * lookup so the column appears the first time the teacher uses Phase 2,
  * without requiring a manual sheet edit.
  */
-// ensureCalendarEventIdColumn adds a "Calendar Event ID" column to the end of the Lesson
+// ensureCalendarEventIdColumn_ adds a "Calendar Event ID" column to the end of the Lesson
 // Schedule tab if it isn't there yet, and styles it. If the column already exists, it does nothing.
-function ensureCalendarEventIdColumn(sheet) {
-  ensureAutoManagedColumn(sheet, CALENDAR_EVENT_ID_COLUMN);
+function ensureCalendarEventIdColumn_(sheet) {
+  ensureAutoManagedColumn_(sheet, CALENDAR_EVENT_ID_COLUMN);
 }
 
-// ensureAutoManagedColumn adds a column the website fills in by itself (such as "Calendar Event
+// ensureAutoManagedColumn_ adds a column the website fills in by itself (such as "Calendar Event
 // ID" or "Time Sheet") to the end of the Lesson Schedule tab if it isn't there yet, styles it,
 // and puts the "please don't edit" warning on it. It gives back the column's number (counting
 // from 1), or -1 if the tab is completely empty.
-function ensureAutoManagedColumn(sheet, columnName) {
+function ensureAutoManagedColumn_(sheet, columnName) {
   // Read the title row, and stop if the tab is empty or the column is already there.
   var lastCol = sheet.getLastColumn();
   if (lastCol < 1) return -1;
@@ -1240,10 +1485,10 @@ function ensureAutoManagedColumn(sheet, columnName) {
   // off-limits from the moment the column appears, even before the
   // teacher runs setupSheetFormatting().
   try {
-    highlightAutoManagedColumn(sheet, newCol, columnName);
-    protectAutoManagedColumn(sheet, newCol);
+    highlightAutoManagedColumn_(sheet, newCol, columnName);
+    protectAutoManagedColumn_(sheet, newCol);
   } catch (err) {
-    Logger.log("ensureAutoManagedColumn(" + columnName + "): highlight/protect failed: " + err);
+    Logger.log("ensureAutoManagedColumn_(" + columnName + "): highlight/protect failed: " + err);
   }
   return newCol;
 }
@@ -1256,10 +1501,10 @@ function ensureAutoManagedColumn(sheet, columnName) {
  * "at least one attendee", so an empty array hitting this side is a bug
  * worth surfacing rather than silently falling back.
  */
-// normalizeAttendeesOverride checks the guest list the teacher may have edited in the preview
+// normalizeAttendeesOverride_ checks the guest list the teacher may have edited in the preview
 // window. It gives back a clean list (no blanks, no repeats, only real-looking email addresses),
 // or nothing if the teacher didn't send a list, in which case the standard list is used.
-function normalizeAttendeesOverride(payload) {
+function normalizeAttendeesOverride_(payload) {
   // No list sent: use the standard guest list instead.
   if (!payload || !("attendees" in payload)) return null;
   if (!Array.isArray(payload.attendees)) {
@@ -1292,10 +1537,10 @@ function normalizeAttendeesOverride(payload) {
 }
 
 /** Builds the calendar event metadata for one row (preview + create share this). */
-// buildEventPreview drafts a calendar event from one lesson row. It is given the row and gives
+// buildEventPreview_ drafts a calendar event from one lesson row. It is given the row and gives
 // back the event's title, start and end times, guest list, and description, plus whether the
 // lesson is already on the calendar. Both the preview window and the real booking use it.
-function buildEventPreview(row) {
+function buildEventPreview_(row) {
   // Pull out each piece of the lesson row, trimmed of stray spaces.
   var studentName = String(row["Student Name"] || "").trim();
   var studentEmail = String(row["Student Email"] || "").trim();
@@ -1310,8 +1555,8 @@ function buildEventPreview(row) {
   // Combine the date with the start and end times, using the spreadsheet's time zone.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var tz = ss.getSpreadsheetTimeZone();
-  var startDate = parseLessonDateTime(lessonDate, startTime, tz);
-  var endDate = parseLessonDateTime(lessonDate, endTime, tz);
+  var startDate = parseLessonDateTime_(lessonDate, startTime, tz);
+  var endDate = parseLessonDateTime_(lessonDate, endTime, tz);
 
   // If the date or times can't be understood, stop and show what was in the row.
   if (!startDate || !endDate) {
@@ -1394,13 +1639,13 @@ function buildEventPreview(row) {
  * ("h:mm AM/PM" or "HH:mm") into a Date interpreted in the given
  * timezone. Returns null on parse failure.
  */
-// parseLessonDateTime joins a date (like "2026-09-25") and a clock time (like "3:30 PM") into one
+// parseLessonDateTime_ joins a date (like "2026-09-25") and a clock time (like "3:30 PM") into one
 // exact moment in the spreadsheet's time zone. It gives back nothing if either can't be read.
-function parseLessonDateTime(dateStr, timeStr, tz) {
+function parseLessonDateTime_(dateStr, timeStr, tz) {
   // Check the date is written as year-month-day, and read the clock time.
   var dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
   if (!dateMatch) return null;
-  var hm = parseWallClockTime(timeStr);
+  var hm = parseWallClockTime_(timeStr);
   if (!hm) return null;
   // Rebuild the moment as text like "2026-09-25 15:30:00" and let Google convert it using the
   // right time zone.
@@ -1414,9 +1659,9 @@ function parseLessonDateTime(dateStr, timeStr, tz) {
   }
 }
 
-// parseWallClockTime reads a clock time typed like "3:30 PM" or "15:30" and gives back the hour
+// parseWallClockTime_ reads a clock time typed like "3:30 PM" or "15:30" and gives back the hour
 // (0 to 23) and minutes. It gives back nothing if the text isn't a sensible time.
-function parseWallClockTime(timeStr) {
+function parseWallClockTime_(timeStr) {
   // Check the text looks like a time: hours, a colon, minutes, and maybe AM or PM.
   var m = /^(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?$/.exec(String(timeStr).trim());
   if (!m) return null;
@@ -1432,9 +1677,9 @@ function parseWallClockTime(timeStr) {
 }
 
 /** "yyyy-MM-dd" string from a value that may already be a Date or a string. */
-// normalizeSheetDate makes sure a date from the Sheet is written as "year-month-day" text,
+// normalizeSheetDate_ makes sure a date from the Sheet is written as "year-month-day" text,
 // whether the cell held a real date or typed text, so dates can be compared reliably.
-function normalizeSheetDate(val, tz) {
+function normalizeSheetDate_(val, tz) {
   if (val instanceof Date) {
     return Utilities.formatDate(val, tz, "yyyy-MM-dd");
   }
@@ -1443,13 +1688,13 @@ function normalizeSheetDate(val, tz) {
 
 /**
  * Wall-clock string ("h:mm a") from a sheet value. Sheets stores
- * time-only cells as Dates from 1899-12-30; the existing rowToObject
+ * time-only cells as Dates from 1899-12-30; the existing rowToObject_
  * already formats those correctly. We mirror that logic here so a row
  * lookup matches what the frontend received and is sending back.
  */
-// normalizeSheetTime does the same for clock times, writing them like "3:30 PM", so a time from
+// normalizeSheetTime_ does the same for clock times, writing them like "3:30 PM", so a time from
 // the Sheet matches the time the website sends back.
-function normalizeSheetTime(val, tz) {
+function normalizeSheetTime_(val, tz) {
   if (val instanceof Date) {
     if (val.getFullYear() < 1900) {
       return Utilities.formatDate(val, tz, "h:mm a");
@@ -1459,9 +1704,9 @@ function normalizeSheetTime(val, tz) {
   return String(val || "").trim();
 }
 
-// headerIndex finds which column has a given title. It gives back the column's position
+// headerIndex_ finds which column has a given title. It gives back the column's position
 // (counting from 0), or -1 if no column has that title.
-function headerIndex(headers, name) {
+function headerIndex_(headers, name) {
   for (var i = 0; i < headers.length; i++) {
     if (String(headers[i]).trim() === name) return i;
   }
@@ -1469,9 +1714,9 @@ function headerIndex(headers, name) {
 }
 
 /** Returns the calendar event or null if it's been deleted out of band. */
-// safeGetEvent looks up a calendar event by its ID. If the event was deleted or can't be found,
+// safeGetEvent_ looks up a calendar event by its ID. If the event was deleted or can't be found,
 // it gives back nothing instead of crashing.
-function safeGetEvent(eventId) {
+function safeGetEvent_(eventId) {
   try {
     return CalendarApp.getDefaultCalendar().getEventById(eventId);
   } catch (err) {
@@ -1480,10 +1725,10 @@ function safeGetEvent(eventId) {
 }
 
 /** Best-effort link to the event in Google Calendar. */
-// eventEditUrl builds a web link that opens the event in Google Calendar for editing. Google
+// eventEditUrl_ builds a web link that opens the event in Google Calendar for editing. Google
 // expects the event's ID and the calendar's ID together, scrambled into a code (base64, a
 // standard way of turning text into letters and numbers that are safe to put in a link).
-function eventEditUrl(event) {
+function eventEditUrl_(event) {
   // event.getId() is "<id>@google.com"; the editor expects just the id part
   var raw = event.getId();
   var atIdx = raw.indexOf("@");
@@ -1508,13 +1753,13 @@ function eventEditUrl(event) {
  * time descending, so the most recently touched material surfaces first
  * even if the folder grows.
  */
-// handleListClassResources gives the website a list of what's in the shared Class Resources
+// handleListClassResources_ gives the website a list of what's in the shared Class Resources
 // folder: the folder's name and link, plus its files and sub-folders, newest first.
 // It only looks; it never changes who can see the folder.
-function handleListClassResources(payload) {
+function handleListClassResources_(payload) {
   // Open the folder, list what's inside, and send both back.
-  var folder = getClassResourcesFolder();
-  var files = listFolderFiles(folder);
+  var folder = getClassResourcesFolder_();
+  var files = listFolderFiles_(folder);
   return {
     ok: true,
     folder: {
@@ -1538,16 +1783,16 @@ function handleListClassResources(payload) {
  * The script owner is intentionally excluded from the grant loop — they
  * own the folder and addViewer would error.
  */
-// handleSyncClassResourcesAccess gives every student on the roster (plus the extra people in the
+// handleSyncClassResourcesAccess_ gives every student on the roster (plus the extra people in the
 // settings) permission to VIEW the shared Class Resources folder. It never removes anyone.
 // It reports back who was newly added, who already had access, and any addresses that failed.
-function handleSyncClassResourcesAccess(payload) {
+function handleSyncClassResourcesAccess_(payload) {
   // Open the folder.
-  var folder = getClassResourcesFolder();
+  var folder = getClassResourcesFolder_();
 
   // Gather everyone who should see it: every roster email plus the extra viewers from the
   // settings, tidied to lowercase.
-  var rosterEmails = getStudentEmails();
+  var rosterEmails = getStudentEmails_();
   var extraEmails = (CLASS_RESOURCES_EXTRA_VIEWERS || []).map(function (e) {
     return String(e || "").trim().toLowerCase();
   }).filter(function (e) { return e !== ""; });
@@ -1637,7 +1882,7 @@ function handleSyncClassResourcesAccess(payload) {
 // Phase 3 — helpers
 // ──────────────────────────────────────────────────────────────────────
 
-/** Maximum number of children returned by handleListClassResources. */
+/** Maximum number of children returned by handleListClassResources_. */
 // At most 100 items are shown on the dashboard, so a very full folder doesn't slow the page.
 var CLASS_RESOURCES_LIST_CAP = 100;
 
@@ -1648,10 +1893,10 @@ var CLASS_RESOURCES_LIST_CAP = 100;
  * messages bubble back to the dashboard as the action's error so the
  * teacher sees what to fix.
  */
-// getClassResourcesFolder opens the shared Class Resources folder using the ID saved in the
+// getClassResourcesFolder_ opens the shared Class Resources folder using the ID saved in the
 // settings drawer. If no ID has been saved, or the ID doesn't open a folder, it stops with a
 // message telling the teacher exactly what to fix.
-function getClassResourcesFolder() {
+function getClassResourcesFolder_() {
   // Look up the saved folder ID. If there isn't one, explain how to set it.
   var folderId = PropertiesService.getScriptProperties()
     .getProperty(CLASS_RESOURCES_FOLDER_ID_PROPERTY_KEY);
@@ -1681,10 +1926,10 @@ function getClassResourcesFolder() {
  * iconLink falls back to a Drive-hosted generic icon when Apps Script
  * doesn't expose one for the mime type.
  */
-// listFolderFiles lists what's directly inside a Drive folder (files and sub-folders, but not
+// listFolderFiles_ lists what's directly inside a Drive folder (files and sub-folders, but not
 // what's inside those sub-folders). For each item it gives back its name, type, last-changed
 // time, link, and a small icon, sorted newest first and capped at 100 items.
-function listFolderFiles(folder) {
+function listFolderFiles_(folder) {
   var entries = [];
 
   // Go through every file in the folder and note its details.
@@ -1697,7 +1942,7 @@ function listFolderFiles(folder) {
       mimeType: f.getMimeType(),
       modifiedTime: f.getLastUpdated().toISOString(),
       webViewLink: f.getUrl(),
-      iconLink: iconLinkForMimeType(f.getMimeType()),
+      iconLink: iconLinkForMimeType_(f.getMimeType()),
       isFolder: false
     });
   }
@@ -1712,7 +1957,7 @@ function listFolderFiles(folder) {
       mimeType: "application/vnd.google-apps.folder",
       modifiedTime: sf.getLastUpdated().toISOString(),
       webViewLink: sf.getUrl(),
-      iconLink: iconLinkForMimeType("application/vnd.google-apps.folder"),
+      iconLink: iconLinkForMimeType_("application/vnd.google-apps.folder"),
       isFolder: true
     });
   }
@@ -1734,10 +1979,10 @@ function listFolderFiles(folder) {
  * 16-px icons keyed by mime type; falling back to the generic file
  * icon when the type isn't recognized keeps the UI tidy.
  */
-// iconLinkForMimeType gives back the web address of Google Drive's small icon for a kind of file
+// iconLinkForMimeType_ gives back the web address of Google Drive's small icon for a kind of file
 // (a "mime type" is a standard label for a file's kind, like PDF or spreadsheet).
 // If the kind is unknown, it uses a plain generic-file icon.
-function iconLinkForMimeType(mimeType) {
+function iconLinkForMimeType_(mimeType) {
   var base = "https://drive-thirdparty.googleusercontent.com/16/type/";
   if (!mimeType) return base + "application/octet-stream";
   return base + mimeType;
@@ -1749,9 +1994,9 @@ function iconLinkForMimeType(mimeType) {
  * Drive will reject genuinely malformed addresses on addViewer, and
  * the sync handler reports those as per-email errors.
  */
-// getStudentEmails reads the form-answers tab and gives back every student's email address,
+// getStudentEmails_ reads the form-answers tab and gives back every student's email address,
 // once each, in lowercase, skipping blank rows. It's used when sharing folders with the roster.
-function getStudentEmails() {
+function getStudentEmails_() {
   // Open the form-answers tab and read everything on it.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("Form Responses 1");
@@ -1795,14 +2040,14 @@ function getStudentEmails() {
  * student granted editor access) so the dashboard never has to know
  * whether the folder exists yet.
  */
-// handleListStudentFolder is used when the teacher opens a student's profile on the website.
+// handleListStudentFolder_ is used when the teacher opens a student's profile on the website.
 // It makes sure that student has a personal Drive folder (creating it if needed) and gives back
 // the folder's name and link plus a list of what's inside it.
-function handleListStudentFolder(payload) {
+function handleListStudentFolder_(payload) {
   // Work out which student this is, make sure their folder exists, then list its contents.
-  var resolved = resolveStudentFromPayload(payload);
-  var ensured = ensureStudentFolder(resolved.email, resolved.name);
-  var files = listFolderFiles(ensured.folder);
+  var resolved = resolveStudentFromPayload_(payload);
+  var ensured = ensureStudentFolder_(resolved.email, resolved.name);
+  var files = listFolderFiles_(ensured.folder);
   // Send back the folder details, the student, and the file list.
   return {
     ok: true,
@@ -1821,14 +2066,14 @@ function handleListStudentFolder(payload) {
  * Same as list-student-folder but without the file listing — useful
  * when the caller only needs to know the folder exists / get its URL.
  * Used internally by sync-student-folders so the bulk sync doesn't pay
- * the per-student `listFolderFiles` cost for every row.
+ * the per-student `listFolderFiles_` cost for every row.
  */
-// handleEnsureStudentFolder does the same as above but skips listing the files, for when only
+// handleEnsureStudentFolder_ does the same as above but skips listing the files, for when only
 // the folder itself (and its link) is needed.
-function handleEnsureStudentFolder(payload) {
+function handleEnsureStudentFolder_(payload) {
   // Work out which student this is, make sure their folder exists, and send back its details.
-  var resolved = resolveStudentFromPayload(payload);
-  var ensured = ensureStudentFolder(resolved.email, resolved.name);
+  var resolved = resolveStudentFromPayload_(payload);
+  var ensured = ensureStudentFolder_(resolved.email, resolved.name);
   return {
     ok: true,
     folder: {
@@ -1849,14 +2094,14 @@ function handleEnsureStudentFolder(payload) {
  *
  * Idempotent. Safe to re-run after adding new students to the form.
  */
-// handleSyncStudentFolders is the "Sync all student folders" button on the Dashboard. It goes
+// handleSyncStudentFolders_ is the "Sync all student folders" button on the Dashboard. It goes
 // through every student on the roster and makes sure each has a personal folder with the right
 // sharing. It reports which folders were newly made, which already existed, and any failures.
-function handleSyncStudentFolders(payload) {
+function handleSyncStudentFolders_(payload) {
   // Open the main Student Resources folder (this stops early if it isn't set up), and get the
   // roster of students with their names.
-  var parent = getStudentResourcesParentFolder();
-  var students = getStudentRoster(); // [{ email, name }, ...]
+  var parent = getStudentResourcesParentFolder_();
+  var students = getStudentRoster_(); // [{ email, name }, ...]
 
   // Three tallies for the report.
   var created = [];
@@ -1867,7 +2112,7 @@ function handleSyncStudentFolders(payload) {
   // stop the rest.
   students.forEach(function (s) {
     try {
-      var ensured = ensureStudentFolder(s.email, s.name);
+      var ensured = ensureStudentFolder_(s.email, s.name);
       if (ensured.created) {
         created.push(s.email);
       } else {
@@ -1901,10 +2146,10 @@ function handleSyncStudentFolders(payload) {
  * have a row for this email yet, we fall back to the email itself for
  * the folder name.
  */
-// resolveStudentFromPayload reads the student's email from the website's request and looks up
+// resolveStudentFromPayload_ reads the student's email from the website's request and looks up
 // their name on the roster. It gives back both. The name may be blank if the student isn't on
 // the roster yet.
-function resolveStudentFromPayload(payload) {
+function resolveStudentFromPayload_(payload) {
   // Tidy the email and stop if it's missing.
   var email = String((payload && payload.studentEmail) || "")
     .trim()
@@ -1912,20 +2157,20 @@ function resolveStudentFromPayload(payload) {
   if (!email) throw new Error("Missing studentEmail");
 
   // Look up the student's name from the form answers.
-  var nameByEmail = getStudentNameMap();
+  var nameByEmail = getStudentNameMap_();
   var name = nameByEmail[email] || "";
   return { email: email, name: name };
 }
 
 /**
  * Returns the parent folder that holds every per-student sub-folder.
- * Same shape as getClassResourcesFolder — throws a teacher-friendly
+ * Same shape as getClassResourcesFolder_ — throws a teacher-friendly
  * message when the property is unset or the ID is bad.
  */
-// getStudentResourcesParentFolder opens the main Student Resources folder (the one that holds
+// getStudentResourcesParentFolder_ opens the main Student Resources folder (the one that holds
 // every student's personal folder), using the ID saved in the settings drawer. If the ID is
 // missing or wrong, it stops with a message telling the teacher what to fix.
-function getStudentResourcesParentFolder() {
+function getStudentResourcesParentFolder_() {
   // Look up the saved folder ID. If there isn't one, explain how to set it.
   var folderId = PropertiesService.getScriptProperties()
     .getProperty(STUDENT_RESOURCES_PARENT_FOLDER_ID_PROPERTY_KEY);
@@ -1963,12 +2208,12 @@ function getStudentResourcesParentFolder() {
  * file contents, never lower a permission, and never delete a stale
  * folder (in case the teacher has work-in-progress in it).
  */
-// ensureStudentFolder makes sure one student has their own Drive folder they can add files to.
+// ensureStudentFolder_ makes sure one student has their own Drive folder they can add files to.
 // It is given the student's email and name. It gives back the folder and whether it was just
 // created. It never deletes a folder and never takes away anyone's access.
-function ensureStudentFolder(email, name) {
+function ensureStudentFolder_(email, name) {
   // An email is required to know whose folder this is.
-  if (!email) throw new Error("ensureStudentFolder requires an email");
+  if (!email) throw new Error("ensureStudentFolder_ requires an email");
 
   // Serialize concurrent calls for the same student. Without this, two
   // POSTs (e.g. dashboard auto-load + bulk sync) racing for the same
@@ -1985,18 +2230,18 @@ function ensureStudentFolder(email, name) {
   }
   // Do the work while holding the lock, then always give the lock back.
   try {
-    return ensureStudentFolderLocked(email, name);
+    return ensureStudentFolderLocked_(email, name);
   } finally {
     lock.releaseLock();
   }
 }
 
-// ensureStudentFolderLocked does the real work of ensureStudentFolder while the lock is held.
+// ensureStudentFolderLocked_ does the real work of ensureStudentFolder_ while the lock is held.
 // It first checks the settings drawer for a remembered folder ID; if there isn't a working one,
 // it creates a new folder. Either way, it then makes sure the right people can edit it.
-function ensureStudentFolderLocked(email, name) {
+function ensureStudentFolderLocked_(email, name) {
   // Open the main Student Resources folder and look for this student's remembered folder ID.
-  var parent = getStudentResourcesParentFolder();
+  var parent = getStudentResourcesParentFolder_();
   var props = PropertiesService.getScriptProperties();
   var cacheKey = STUDENT_FOLDER_PROPERTY_PREFIX + email;
   var cachedId = props.getProperty(cacheKey);
@@ -2016,19 +2261,19 @@ function ensureStudentFolderLocked(email, name) {
   // No usable folder: make a new one named after the student, and remember its ID.
   var created = false;
   if (!folder) {
-    folder = parent.createFolder(studentFolderName(name, email));
+    folder = parent.createFolder(studentFolderName_(name, email));
     props.setProperty(cacheKey, folder.getId());
     created = true;
   } else {
     // Folder already exists: if the student's name has changed on the form, rename the folder.
-    var desiredName = studentFolderName(name, email);
+    var desiredName = studentFolderName_(name, email);
     if (folder.getName() !== desiredName && name) {
       folder.setName(desiredName);
     }
   }
 
   // Make sure the student and the extra editors can add and change files in the folder.
-  applyStudentFolderPermissions(folder, email);
+  applyStudentFolderPermissions_(folder, email);
   return { folder: folder, created: created };
 }
 
@@ -2042,10 +2287,10 @@ function ensureStudentFolderLocked(email, name) {
  * listing for the teacher. The dashboard's "Sync student folders"
  * backfill button can re-try later.
  */
-// applyStudentFolderPermissions gives the student, plus the extra editors from the settings,
+// applyStudentFolderPermissions_ gives the student, plus the extra editors from the settings,
 // permission to add and change files in the student's folder. People who already have that
 // access are left alone. If Google refuses an address, it's noted in the log and skipped.
-function applyStudentFolderPermissions(folder, studentEmail) {
+function applyStudentFolderPermissions_(folder, studentEmail) {
   var normalizedStudent = String(studentEmail || "").trim().toLowerCase();
 
   // Find out who can already edit this folder.
@@ -2096,7 +2341,7 @@ function applyStudentFolderPermissions(folder, studentEmail) {
       // Gmail with restricted sharing). Teacher can re-share manually
       // from Drive if needed.
       Logger.log(
-        "applyStudentFolderPermissions: addEditor(" + em + ") on folder " +
+        "applyStudentFolderPermissions_: addEditor(" + em + ") on folder " +
         folder.getId() + " failed: " + (err && err.message ? err.message : err)
       );
     }
@@ -2109,10 +2354,10 @@ function applyStudentFolderPermissions(folder, studentEmail) {
  * folder name makes it easy for the teacher to find a folder in Drive
  * directly when the cache is empty / mid-debugging.
  */
-// studentFolderName decides what a student's folder is called: "Name - email" when the name is
+// studentFolderName_ decides what a student's folder is called: "Name - email" when the name is
 // known, or just the email when it isn't. Keeping the email in the name makes folders easy to
 // find in Drive.
-function studentFolderName(name, email) {
+function studentFolderName_(name, email) {
   var trimmed = String(name || "").trim();
   if (!trimmed) return String(email).trim();
   return trimmed + " - " + String(email).trim();
@@ -2121,12 +2366,12 @@ function studentFolderName(name, email) {
 /**
  * Reads "Form Responses 1" and returns a map of email → name (the
  * latest non-empty name wins for a given email). Used by
- * `resolveStudentFromPayload` for per-student lookups.
+ * `resolveStudentFromPayload_` for per-student lookups.
  */
-// getStudentNameMap reads the form-answers tab and builds a lookup from each student's email to
+// getStudentNameMap_ reads the form-answers tab and builds a lookup from each student's email to
 // their name. If a student submitted the form more than once, the latest name is used.
 // It gives back an empty lookup if the tab or the email column is missing.
-function getStudentNameMap() {
+function getStudentNameMap_() {
   // Open the form-answers tab and read everything on it.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName("Form Responses 1");
@@ -2157,14 +2402,14 @@ function getStudentNameMap() {
 
 /**
  * Deduped roster as `[{ email, name }, ...]`. Used by the bulk
- * sync handler. Same source of truth as `getStudentEmails` (Form
+ * sync handler. Same source of truth as `getStudentEmails_` (Form
  * Responses 1); the name is best-effort and may be empty.
  */
-// getStudentRoster gives back the list of students, each with an email and a name (the name
+// getStudentRoster_ gives back the list of students, each with an email and a name (the name
 // may be blank). It combines the two helpers just above.
-function getStudentRoster() {
-  var emails = getStudentEmails();
-  var nameByEmail = getStudentNameMap();
+function getStudentRoster_() {
+  var emails = getStudentEmails_();
+  var nameByEmail = getStudentNameMap_();
   return emails.map(function (em) {
     return { email: em, name: nameByEmail[em] || "" };
   });
@@ -2182,13 +2427,13 @@ function getStudentRoster() {
  * a clean null return rather than an error so the UI can render an
  * empty state without a server roundtrip first.
  */
-// handleGetLessonRecap fetches the teacher's recap for one lesson, identified by the student's
+// handleGetLessonRecap_ fetches the teacher's recap for one lesson, identified by the student's
 // email, lesson date, and start time. It gives back the recap, or "none" if it hasn't been
 // written yet. It only reads; it never changes the Sheet.
-function handleGetLessonRecap(payload) {
+function handleGetLessonRecap_(payload) {
   // Read the three identifying details, then look for a matching recap row.
-  var key = parseRecapKey(payload);
-  var existing = findRecapRow(key);
+  var key = parseRecapKey_(payload);
+  var existing = findRecapRow_(key);
   return {
     ok: true,
     recap: existing ? existing.recap : null
@@ -2203,13 +2448,13 @@ function handleGetLessonRecap(payload) {
  * empty string. Updated At is set server-side (current time in the
  * spreadsheet's TZ).
  */
-// handleSaveLessonRecap saves the teacher's recap for one lesson into the Lesson Recaps tab.
+// handleSaveLessonRecap_ saves the teacher's recap for one lesson into the Lesson Recaps tab.
 // The recap has four parts: the greeting, what we did today, the homework, and plans for next
 // class. If a recap for that lesson already exists it is updated; otherwise a new row is added.
 // It gives back the saved recap, including when it was saved. The real work happens in
-// saveLessonRecapLocked, just below.
-function handleSaveLessonRecap(payload) {
-  // Serialize concurrent saves, the same way handleCreateEvent does. Without this, two saves
+// saveLessonRecapLocked_, just below.
+function handleSaveLessonRecap_(payload) {
+  // Serialize concurrent saves, the same way handleCreateEvent_ does. Without this, two saves
   // for a lesson that has no recap yet (a double-click, or two browser tabs) could both miss
   // the existing-row lookup below and each append a new row, leaving duplicate recaps.
   // In plain terms: take the "lock" (the single key to the room) so only one recap save
@@ -2223,18 +2468,18 @@ function handleSaveLessonRecap(payload) {
   // Save while holding the lock, and always hand the key back afterward, even if something
   // went wrong.
   try {
-    return saveLessonRecapLocked(payload);
+    return saveLessonRecapLocked_(payload);
   } finally {
     lock.releaseLock();
   }
 }
 
-// saveLessonRecapLocked does the actual saving, and only runs while the lock above is held.
+// saveLessonRecapLocked_ does the actual saving, and only runs while the lock above is held.
 // It finds the lesson's existing recap row (or adds a new one at the bottom) and writes the
 // four recap parts into it.
-function saveLessonRecapLocked(payload) {
+function saveLessonRecapLocked_(payload) {
   // Read which lesson this is for and the four parts the teacher wrote. Missing parts are blank.
-  var key = parseRecapKey(payload);
+  var key = parseRecapKey_(payload);
   var fields = (payload && payload.fields) || {};
 
   var greeting = String(fields.greeting || "");
@@ -2246,22 +2491,22 @@ function saveLessonRecapLocked(payload) {
   // recaps stay readable even if the original lesson row only had an
   // email. We take "best name we know now"; if the form hasn't been
   // submitted yet the column stays blank, which is fine.
-  var nameByEmail = getStudentNameMap();
+  var nameByEmail = getStudentNameMap_();
   var studentName = nameByEmail[key.studentEmail] || "";
 
   // Open the Lesson Recaps tab (creating it the first time) and find each column by its title.
   // The "+ 1" converts to the Sheet's column numbers, which start at 1.
-  var sheet = ensureRecapsSheet();
-  var headers = recapHeaders(sheet);
-  var emailCol = headerIndex(headers, "Student Email") + 1;
-  var nameCol = headerIndex(headers, "Student Name") + 1;
-  var dateCol = headerIndex(headers, "Lesson Date") + 1;
-  var startCol = headerIndex(headers, "Start Time") + 1;
-  var greetingCol = headerIndex(headers, "Greeting") + 1;
-  var todayCol = headerIndex(headers, "Today We") + 1;
-  var homeworkCol = headerIndex(headers, "Homework") + 1;
-  var nextCol = headerIndex(headers, "Next Class") + 1;
-  var updatedCol = headerIndex(headers, "Updated At") + 1;
+  var sheet = ensureRecapsSheet_();
+  var headers = recapHeaders_(sheet);
+  var emailCol = headerIndex_(headers, "Student Email") + 1;
+  var nameCol = headerIndex_(headers, "Student Name") + 1;
+  var dateCol = headerIndex_(headers, "Lesson Date") + 1;
+  var startCol = headerIndex_(headers, "Start Time") + 1;
+  var greetingCol = headerIndex_(headers, "Greeting") + 1;
+  var todayCol = headerIndex_(headers, "Today We") + 1;
+  var homeworkCol = headerIndex_(headers, "Homework") + 1;
+  var nextCol = headerIndex_(headers, "Next Class") + 1;
+  var updatedCol = headerIndex_(headers, "Updated At") + 1;
 
   // Note the current date and time in the spreadsheet's time zone, as the "Updated At" stamp.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2271,7 +2516,7 @@ function saveLessonRecapLocked(payload) {
 
   // If a recap for this lesson already exists, reuse its row. If not, start a new row at the
   // bottom and fill in which student and lesson it belongs to.
-  var existing = findRecapRow(key);
+  var existing = findRecapRow_(key);
   var rowIndex;
   if (existing) {
     rowIndex = existing.rowIndex;
@@ -2315,9 +2560,9 @@ function saveLessonRecapLocked(payload) {
  * then start time desc (newest first). `[]` when the tab is missing
  * or the student has no recaps yet.
  */
-// handleListRecapsForStudent gives back every recap for one student, newest lesson first.
+// handleListRecapsForStudent_ gives back every recap for one student, newest lesson first.
 // It gives back an empty list if there are none yet.
-function handleListRecapsForStudent(payload) {
+function handleListRecapsForStudent_(payload) {
   // Tidy the student's email and stop if it's missing.
   var email = String((payload && payload.studentEmail) || "")
     .trim()
@@ -2325,10 +2570,10 @@ function handleListRecapsForStudent(payload) {
   if (!email) throw new Error("Missing studentEmail");
 
   // Read all recaps, keep only this student's, and sort them newest first.
-  var recaps = readAllRecaps().filter(function (r) {
+  var recaps = readAllRecaps_().filter(function (r) {
     return String(r.studentEmail).toLowerCase() === email;
   });
-  recaps.sort(compareRecapsNewestFirst);
+  recaps.sort(compareRecapsNewestFirst_);
   return { ok: true, recaps: recaps };
 }
 
@@ -2336,11 +2581,11 @@ function handleListRecapsForStudent(payload) {
  * Returns every recap in the system, sorted newest first. Used by
  * the Recaps tab page on the website.
  */
-// handleListRecaps gives back every recap for every student, newest lesson first. It feeds the
+// handleListRecaps_ gives back every recap for every student, newest lesson first. It feeds the
 // Recaps page on the website.
-function handleListRecaps(payload) {
-  var recaps = readAllRecaps();
-  recaps.sort(compareRecapsNewestFirst);
+function handleListRecaps_(payload) {
+  var recaps = readAllRecaps_();
+  recaps.sort(compareRecapsNewestFirst_);
   return { ok: true, recaps: recaps };
 }
 
@@ -2348,9 +2593,9 @@ function handleListRecaps(payload) {
 // Phase 5 — helpers
 // ──────────────────────────────────────────────────────────────────────
 
-// parseRecapKey pulls the three details that identify a lesson (student email, lesson date,
+// parseRecapKey_ pulls the three details that identify a lesson (student email, lesson date,
 // start time) out of the website's request. It stops with an error if any is missing.
-function parseRecapKey(payload) {
+function parseRecapKey_(payload) {
   var studentEmail = String((payload && payload.studentEmail) || "")
     .trim()
     .toLowerCase();
@@ -2368,9 +2613,9 @@ function parseRecapKey(payload) {
  * a different column order are left alone — we look up columns by
  * header name, not position.
  */
-// ensureRecapsSheet opens the Lesson Recaps tab, creating it with its column titles the first
+// ensureRecapsSheet_ opens the Lesson Recaps tab, creating it with its column titles the first
 // time a recap is saved. It gives back the tab.
-function ensureRecapsSheet() {
+function ensureRecapsSheet_() {
   // Look for the tab.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(LESSON_RECAPS_SHEET_NAME);
@@ -2395,9 +2640,9 @@ function ensureRecapsSheet() {
   // If we just set it up, apply the studio's colors. A styling problem never blocks saving.
   if (freshlyCreated) {
     try {
-      formatLessonRecapsSheet(sheet);
+      formatLessonRecapsSheet_(sheet);
     } catch (err) {
-      Logger.log("formatLessonRecapsSheet failed: " + err);
+      Logger.log("formatLessonRecapsSheet_ failed: " + err);
     }
   }
   return sheet;
@@ -2408,9 +2653,9 @@ function ensureRecapsSheet() {
  * headers from LESSON_RECAPS_HEADERS that are missing (so older
  * sheets created before a new column was added still work).
  */
-// recapHeaders reads the Lesson Recaps tab's column titles. If an expected title is missing
+// recapHeaders_ reads the Lesson Recaps tab's column titles. If an expected title is missing
 // (for example, a column added in a later version), it adds it at the end. Gives back the titles.
-function recapHeaders(sheet) {
+function recapHeaders_(sheet) {
   // Read the title row and note which titles are present.
   var lastCol = Math.max(sheet.getLastColumn(), 1);
   var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
@@ -2434,9 +2679,9 @@ function recapHeaders(sheet) {
  * `null` (not throws) when the tab doesn't exist, which is the
  * pre-first-save state.
  */
-// findRecapRow searches the Lesson Recaps tab for the recap of one lesson (matching email, date,
+// findRecapRow_ searches the Lesson Recaps tab for the recap of one lesson (matching email, date,
 // and start time). It gives back the row number and the recap, or nothing if there isn't one.
-function findRecapRow(key) {
+function findRecapRow_(key) {
   // Open the tab and read it. No tab, or no rows below the titles, means no recap yet.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(LESSON_RECAPS_SHEET_NAME);
@@ -2446,9 +2691,9 @@ function findRecapRow(key) {
 
   // Find the three identifying columns by title. If any is missing, there's nothing to match.
   var headers = data[0];
-  var emailCol = headerIndex(headers, "Student Email");
-  var dateCol = headerIndex(headers, "Lesson Date");
-  var startCol = headerIndex(headers, "Start Time");
+  var emailCol = headerIndex_(headers, "Student Email");
+  var dateCol = headerIndex_(headers, "Lesson Date");
+  var startCol = headerIndex_(headers, "Start Time");
   if (emailCol === -1 || dateCol === -1 || startCol === -1) return null;
 
   // Go down each row and stop at the first one where the email, date, and start time all match.
@@ -2456,13 +2701,13 @@ function findRecapRow(key) {
   for (var r = 1; r < data.length; r++) {
     var rowEmail = String(data[r][emailCol] || "").trim().toLowerCase();
     if (rowEmail !== key.studentEmail) continue;
-    var rowDate = normalizeSheetDate(data[r][dateCol], ssTz);
+    var rowDate = normalizeSheetDate_(data[r][dateCol], ssTz);
     if (rowDate !== key.lessonDate) continue;
-    var rowStart = normalizeSheetTime(data[r][startCol], ssTz);
+    var rowStart = normalizeSheetTime_(data[r][startCol], ssTz);
     if (rowStart !== key.startTime) continue;
     return {
       rowIndex: r + 1,
-      recap: recapRowToObject(headers, data[r], ssTz)
+      recap: recapRowToObject_(headers, data[r], ssTz)
     };
   }
   return null;
@@ -2473,9 +2718,9 @@ function findRecapRow(key) {
  * Returns `[]` when the tab is missing — which is normal until the
  * teacher saves their first recap.
  */
-// readAllRecaps reads every recap in the Lesson Recaps tab into a list, skipping blank rows.
+// readAllRecaps_ reads every recap in the Lesson Recaps tab into a list, skipping blank rows.
 // It gives back an empty list if the tab doesn't exist yet.
-function readAllRecaps() {
+function readAllRecaps_() {
   // Open the tab and read it. No tab, or no rows below the titles, means an empty list.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(LESSON_RECAPS_SHEET_NAME);
@@ -2488,20 +2733,20 @@ function readAllRecaps() {
   var out = [];
   for (var r = 1; r < data.length; r++) {
     var row = data[r];
-    var email = String(row[headerIndex(headers, "Student Email")] || "").trim();
+    var email = String(row[headerIndex_(headers, "Student Email")] || "").trim();
     if (!email) continue; // skip blank rows
-    out.push(recapRowToObject(headers, row, ssTz));
+    out.push(recapRowToObject_(headers, row, ssTz));
   }
   return out;
 }
 
-// recapRowToObject turns one row of the Lesson Recaps tab into a labeled recap record the
+// recapRowToObject_ turns one row of the Lesson Recaps tab into a labeled recap record the
 // website understands, with dates and times written the same way everywhere.
-function recapRowToObject(headers, row, ssTz) {
+function recapRowToObject_(headers, row, ssTz) {
   // A small helper: given a column title, fetch this row's value in that column (blank if the
   // column doesn't exist).
   function pick(name) {
-    var idx = headerIndex(headers, name);
+    var idx = headerIndex_(headers, name);
     return idx === -1 ? "" : row[idx];
   }
   // Read the date, the start time, and the "last saved" time, and put each in a standard form.
@@ -2509,8 +2754,8 @@ function recapRowToObject(headers, row, ssTz) {
   var startRaw = pick("Start Time");
   var updatedRaw = pick("Updated At");
 
-  var lessonDate = normalizeSheetDate(dateRaw, ssTz);
-  var startTime = normalizeSheetTime(startRaw, ssTz);
+  var lessonDate = normalizeSheetDate_(dateRaw, ssTz);
+  var startTime = normalizeSheetTime_(startRaw, ssTz);
   var updatedAt;
   if (updatedRaw instanceof Date) {
     updatedAt = updatedRaw.toISOString();
@@ -2533,17 +2778,17 @@ function recapRowToObject(headers, row, ssTz) {
 }
 
 /** Sort comparator: newer lesson first; if same date, later start first. */
-// compareRecapsNewestFirst decides the order of two recaps when sorting: the later lesson date
+// compareRecapsNewestFirst_ decides the order of two recaps when sorting: the later lesson date
 // comes first, and on the same day the later start time comes first.
-function compareRecapsNewestFirst(a, b) {
+function compareRecapsNewestFirst_(a, b) {
   // Compare dates first. Year-month-day text sorts in date order, so a simple comparison works.
   if (a.lessonDate < b.lessonDate) return 1;
   if (a.lessonDate > b.lessonDate) return -1;
   // Same date — compare start times. Wall-clock strings sort poorly;
-  // compare via Date objects parsed with parseWallClockTime.
+  // compare via Date objects parsed with parseWallClockTime_.
   // Turn each start time into minutes after midnight, so "2:00 PM" correctly beats "9:00 AM".
-  var ah = parseWallClockTime(a.startTime) || { h: 0, m: 0 };
-  var bh = parseWallClockTime(b.startTime) || { h: 0, m: 0 };
+  var ah = parseWallClockTime_(a.startTime) || { h: 0, m: 0 };
+  var bh = parseWallClockTime_(b.startTime) || { h: 0, m: 0 };
   var aMin = ah.h * 60 + ah.m;
   var bMin = bh.h * 60 + bh.m;
   return bMin - aMin;
@@ -2574,12 +2819,12 @@ var TIMESHEET_CANT_OPEN_MESSAGE =
  * timesheet-status. Never throws for a setup problem; it answers
  * { configured: false, reason } instead so the dashboard can say "not connected yet".
  */
-// handleTimesheetStatus tells the website whether the time sheet is connected. If it is, it also
+// handleTimesheetStatus_ tells the website whether the time sheet is connected. If it is, it also
 // sends the sheet's link and title, the tab today's lessons go to, the start date, and the
 // choices in each dropdown list. If not, it says which setting is the problem, in plain words.
-function handleTimesheetStatus(payload) {
+function handleTimesheetStatus_(payload) {
   // Start with a "not connected" answer and fill it in as each check passes.
-  var config = readTimesheetConfig();
+  var config = readTimesheetConfig_();
   var answer = {
     ok: true,
     configured: false,
@@ -2600,30 +2845,30 @@ function handleTimesheetStatus(payload) {
   try {
     ts = SpreadsheetApp.openById(config.id);
   } catch (err) {
-    answer.reason = TIMESHEET_CANT_OPEN_MESSAGE + googleSaid(err);
+    answer.reason = TIMESHEET_CANT_OPEN_MESSAGE + googleSaid_(err);
     return answer;
   }
 
   // Connected. Work out today's school-year tab (in the time sheet's own time zone) and read
   // the dropdown lists from the lookup tabs.
   var tz = ts.getSpreadsheetTimeZone();
-  var targetTab = schoolYearTabName(Utilities.formatDate(new Date(), tz, "yyyy-MM-dd"));
+  var targetTab = schoolYearTabName_(Utilities.formatDate(new Date(), tz, "yyyy-MM-dd"));
   answer.configured = true;
   answer.sheetUrl = ts.getUrl();
   answer.sheetTitle = ts.getName();
   answer.targetTab = targetTab;
-  answer.targetTabExists = findYearTab(ts, targetTab) !== null;
-  answer.lists = readTimesheetLists(ts).values;
+  answer.targetTabExists = findYearTab_(ts, targetTab) !== null;
+  answer.lists = readTimesheetLists_(ts).values;
   return answer;
 }
 
-// handlePreviewTimesheetRow shows exactly which row WOULD be added to the time sheet for one
+// handlePreviewTimesheetRow_ shows exactly which row WOULD be added to the time sheet for one
 // lesson (student email, lesson date, start time), without changing anything. It also says which
 // tab the row goes to, whether that tab would be created, whether a term label row would be added
 // above it, and plain-English warnings for anything the teacher should check first.
-function handlePreviewTimesheetRow(payload) {
-  var ctx = loadTimesheetLesson(payload);
-  var plan = planTimesheetRow(ctx, readTimesheetOverrides(payload));
+function handlePreviewTimesheetRow_(payload) {
+  var ctx = loadTimesheetLesson_(payload);
+  var plan = planTimesheetRow_(ctx, readTimesheetOverrides_(payload));
   return {
     ok: true,
     tab: plan.tab,
@@ -2643,10 +2888,10 @@ function handlePreviewTimesheetRow(payload) {
   };
 }
 
-// handleAddTimesheetRow adds one lesson to the time sheet and notes it on the Lesson Schedule.
+// handleAddTimesheetRow_ adds one lesson to the time sheet and notes it on the Lesson Schedule.
 // It takes the same lock as the other changes, so two clicks (or two browser tabs) can't add
-// the same lesson twice. The real work happens in addTimesheetRowLocked, just below.
-function handleAddTimesheetRow(payload) {
+// the same lesson twice. The real work happens in addTimesheetRowLocked_, just below.
+function handleAddTimesheetRow_(payload) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(30 * 1000)) {
     throw new Error(
@@ -2654,33 +2899,33 @@ function handleAddTimesheetRow(payload) {
     );
   }
   try {
-    return addTimesheetRowLocked(payload);
+    return addTimesheetRowLocked_(payload);
   } finally {
     lock.releaseLock();
   }
 }
 
-// addTimesheetRowLocked does the adding, only while the lock is held, in this order:
+// addTimesheetRowLocked_ does the adding, only while the lock is held, in this order:
 //   1. check (again, with a fresh read) whether the lesson is already on the tab,
 //   2. append the row,
 //   3. write "Added <date>" in the lesson's Time Sheet cell on the Lesson Schedule.
 // If the lesson is already on the tab, nothing is appended; only the note is written. That makes
 // a retry safe after a call that added the row but failed before writing the note.
-function addTimesheetRowLocked(payload) {
-  var ctx = loadTimesheetLesson(payload);
-  if (isSkippedMark(ctx.mark)) {
+function addTimesheetRowLocked_(payload) {
+  var ctx = loadTimesheetLesson_(payload);
+  if (isSkippedMark_(ctx.mark)) {
     throw new Error(
       'This lesson is marked "Skipped" on the Lesson Schedule. To add it after all, clear its ' +
       "Time Sheet cell there, then try again."
     );
   }
-  var plan = planTimesheetRow(ctx, readTimesheetOverrides(payload));
+  var plan = planTimesheetRow_(ctx, readTimesheetOverrides_(payload));
 
   // Step 1: already on the tab? Then don't add a second row; just write the note.
   if (plan.duplicate) {
-    var existingMark = isAddedMark(ctx.mark) ? ctx.mark : addedMarkText(ctx.studioTz);
-    if (!isAddedMark(ctx.mark)) {
-      writeTimesheetMark(ctx.found, existingMark, plan.tab, plan.duplicate.rowNumber);
+    var existingMark = isAddedMark_(ctx.mark) ? ctx.mark : addedMarkText_(ctx.studioTz);
+    if (!isAddedMark_(ctx.mark)) {
+      writeTimesheetMark_(ctx.found, existingMark, plan.tab, plan.duplicate.rowNumber);
     }
     return {
       ok: true,
@@ -2696,7 +2941,7 @@ function addTimesheetRowLocked(payload) {
 
   // The Lesson Schedule says it was added, but no matching row is on the tab. Rather than guess,
   // stop: someone may have deleted the row, or the name may be spelled differently there.
-  if (isAddedMark(ctx.mark)) {
+  if (isAddedMark_(ctx.mark)) {
     throw new Error(
       'This lesson is already marked "' + ctx.mark + '" on the Lesson Schedule, but no row for ' +
       "it was found on " + plan.tab + " (it may have been deleted, or the name may be spelled " +
@@ -2705,11 +2950,11 @@ function addTimesheetRowLocked(payload) {
   }
 
   // Step 2: append the row (with a term label row above it when this starts a new term).
-  var appended = appendTimesheetRow(ctx, plan);
+  var appended = appendTimesheetRow_(ctx, plan);
 
   // Step 3: note it on the Lesson Schedule, so it leaves the dashboard's list.
-  var mark = addedMarkText(ctx.studioTz);
-  writeTimesheetMark(ctx.found, mark, plan.tab, appended.rowNumber);
+  var mark = addedMarkText_(ctx.studioTz);
+  writeTimesheetMark_(ctx.found, mark, plan.tab, appended.rowNumber);
   return {
     ok: true,
     alreadyThere: false,
@@ -2723,9 +2968,9 @@ function addTimesheetRowLocked(payload) {
   };
 }
 
-// handleSkipTimesheetRow marks one lesson "Skipped" on the Lesson Schedule: it didn't happen, or
+// handleSkipTimesheetRow_ marks one lesson "Skipped" on the Lesson Schedule: it didn't happen, or
 // it's already on the time sheet. It never opens or changes the time sheet.
-function handleSkipTimesheetRow(payload) {
+function handleSkipTimesheetRow_(payload) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(30 * 1000)) {
     throw new Error(
@@ -2733,14 +2978,14 @@ function handleSkipTimesheetRow(payload) {
     );
   }
   try {
-    requireLessonKey(payload);
-    var found = findLessonRowFromPayload(payload);
+    requireLessonKey_(payload);
+    var found = findLessonRowFromPayload_(payload);
     var mark = String(found.row[TIME_SHEET_COLUMN] || "").trim();
     // A lesson that is already on the time sheet keeps its "Added" note.
-    if (isAddedMark(mark)) {
+    if (isAddedMark_(mark)) {
       throw new Error('This lesson is already marked "' + mark + '", so there is nothing to skip.');
     }
-    if (!isSkippedMark(mark)) writeTimesheetMark(found, "Skipped", null, null);
+    if (!isSkippedMark_(mark)) writeTimesheetMark_(found, "Skipped", null, null);
     return { ok: true, skipped: true, mark: "Skipped" };
   } finally {
     lock.releaseLock();
@@ -2751,20 +2996,20 @@ function handleSkipTimesheetRow(payload) {
 // Phase 6 — settings and the lesson being logged
 // ──────────────────────────────────────────────────────────────────────
 
-// readTimesheetConfig reads the two time sheet settings from the settings drawer (Script
+// readTimesheetConfig_ reads the two time sheet settings from the settings drawer (Script
 // Properties). It gives back { ok, id, startDate } when both are usable, or { ok: false, reason }
 // naming what's wrong in plain words. startDate is included whenever it is a real date.
-function readTimesheetConfig() {
+function readTimesheetConfig_() {
   var props = PropertiesService.getScriptProperties();
   var rawId = String(props.getProperty(TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY) || "").trim();
   var rawStart = String(props.getProperty(TIMESHEET_START_DATE_PROPERTY_KEY) || "").trim();
-  var startDate = isValidDateKey(rawStart) ? rawStart : null;
+  var startDate = isValidDateKey_(rawStart) ? rawStart : null;
 
   // Collect every problem, so one message covers them all.
   var problems = [];
   if (!rawId) {
     problems.push("the " + TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + " Script Property isn't set");
-  } else if (!spreadsheetIdFromSetting(rawId)) {
+  } else if (!spreadsheetIdFromSetting_(rawId)) {
     problems.push(TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + " doesn't look like a Google Sheets ID or link");
   }
   if (!rawStart) {
@@ -2779,13 +3024,13 @@ function readTimesheetConfig() {
     var reason = problems.join(", and ") + ".";
     return { ok: false, reason: reason.charAt(0).toUpperCase() + reason.substring(1), startDate: startDate };
   }
-  return { ok: true, id: spreadsheetIdFromSetting(rawId), startDate: startDate };
+  return { ok: true, id: spreadsheetIdFromSetting_(rawId), startDate: startDate };
 }
 
-// spreadsheetIdFromSetting accepts either a bare spreadsheet ID or a whole Google Sheets web
+// spreadsheetIdFromSetting_ accepts either a bare spreadsheet ID or a whole Google Sheets web
 // address, and gives back just the ID (the part between "/d/" and the next "/"). It gives back ""
 // if the text doesn't look like an ID.
-function spreadsheetIdFromSetting(raw) {
+function spreadsheetIdFromSetting_(raw) {
   var text = String(raw || "").trim();
   var marker = text.indexOf("/d/");
   if (marker !== -1) {
@@ -2795,25 +3040,25 @@ function spreadsheetIdFromSetting(raw) {
   return /^[A-Za-z0-9_-]{10,}$/.test(text) ? text : "";
 }
 
-// openTimesheet opens the time sheet by its ID, or stops with a plain-English message.
-function openTimesheet(id) {
+// openTimesheet_ opens the time sheet by its ID, or stops with a plain-English message.
+function openTimesheet_(id) {
   try {
     return SpreadsheetApp.openById(id);
   } catch (err) {
-    throw new Error(TIMESHEET_CANT_OPEN_MESSAGE + googleSaid(err));
+    throw new Error(TIMESHEET_CANT_OPEN_MESSAGE + googleSaid_(err));
   }
 }
 
-// googleSaid turns Google's own error words into a short ending for a plain-English message, like
+// googleSaid_ turns Google's own error words into a short ending for a plain-English message, like
 // " (Google said: You do not have permission to access the requested document.)".
-function googleSaid(err) {
+function googleSaid_(err) {
   var raw = String(err && err.message ? err.message : err).replace(/^Exception:\s*/, "").trim();
   return raw ? " (Google said: " + raw + ")" : "";
 }
 
-// requireLessonKey checks the request names a lesson (student email, lesson date, start time) and
+// requireLessonKey_ checks the request names a lesson (student email, lesson date, start time) and
 // stops with a plain-English message if a piece is missing.
-function requireLessonKey(payload) {
+function requireLessonKey_(payload) {
   if (!String((payload && payload.studentEmail) || "").trim() ||
       !String((payload && payload.lessonDate) || "").trim()) {
     throw new Error("The request didn't say which lesson (a student email and a lesson date are needed).");
@@ -2826,22 +3071,22 @@ function requireLessonKey(payload) {
   }
 }
 
-// loadTimesheetLesson gathers what is needed to plan a time sheet row for one lesson: the two
+// loadTimesheetLesson_ gathers what is needed to plan a time sheet row for one lesson: the two
 // settings, the lesson's row on the Lesson Schedule, and the opened time sheet. It stops with a
 // plain-English message if the time sheet isn't connected, or if the lesson can't be offered
 // (dated before TIMESHEET_START_DATE, not happened yet, or cancelled).
-function loadTimesheetLesson(payload) {
-  requireLessonKey(payload);
-  var config = readTimesheetConfig();
+function loadTimesheetLesson_(payload) {
+  requireLessonKey_(payload);
+  var config = readTimesheetConfig_();
   if (!config.ok) {
     throw new Error("The time sheet isn't connected yet. " + config.reason);
   }
 
   // Find the lesson on the Lesson Schedule and read its date as year-month-day, using the studio
   // spreadsheet's own time zone.
-  var found = findLessonRowFromPayload(payload);
+  var found = findLessonRowFromPayload_(payload);
   var studioTz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
-  var lessonDateKey = dateKeyFromLessonCell(found.row["Lesson Date"], studioTz);
+  var lessonDateKey = dateKeyFromLessonCell_(found.row["Lesson Date"], studioTz);
   if (!lessonDateKey) {
     throw new Error(
       'Can\'t read this lesson\'s date on the Lesson Schedule ("' + found.row["Lesson Date"] + '").'
@@ -2851,8 +3096,8 @@ function loadTimesheetLesson(payload) {
   // Lessons before the start date were typed into the time sheet by hand: never offer them.
   if (lessonDateKey < config.startDate) {
     throw new Error(
-      "This lesson (" + displayDateFromKey(lessonDateKey) + ") is dated before " +
-      TIMESHEET_START_DATE_PROPERTY_KEY + " (" + displayDateFromKey(config.startDate) + "). " +
+      "This lesson (" + displayDateFromKey_(lessonDateKey) + ") is dated before " +
+      TIMESHEET_START_DATE_PROPERTY_KEY + " (" + displayDateFromKey_(config.startDate) + "). " +
       "Lessons before that date were typed into the time sheet by hand, so the tool doesn't offer them."
     );
   }
@@ -2860,7 +3105,7 @@ function loadTimesheetLesson(payload) {
   var todayKey = Utilities.formatDate(new Date(), studioTz, "yyyy-MM-dd");
   if (lessonDateKey > todayKey) {
     throw new Error(
-      "This lesson (" + displayDateFromKey(lessonDateKey) + ") hasn't happened yet, so it can't " +
+      "This lesson (" + displayDateFromKey_(lessonDateKey) + ") hasn't happened yet, so it can't " +
       "go on the time sheet."
     );
   }
@@ -2870,7 +3115,7 @@ function loadTimesheetLesson(payload) {
     throw new Error("This lesson is marked Cancelled on the Lesson Schedule, so it isn't added to the time sheet.");
   }
 
-  var ts = openTimesheet(config.id);
+  var ts = openTimesheet_(config.id);
   return {
     config: config,
     found: found,
@@ -2882,10 +3127,10 @@ function loadTimesheetLesson(payload) {
   };
 }
 
-// readTimesheetOverrides reads the values the teacher changed in the preview window (lesson
+// readTimesheetOverrides_ reads the values the teacher changed in the preview window (lesson
 // number, first and last name, block, hours, subject). A value that wasn't sent is left out, so
 // the script works it out itself; an empty value means "leave this cell blank".
-function readTimesheetOverrides(payload) {
+function readTimesheetOverrides_(payload) {
   var raw = payload && payload.overrides;
   if (raw === undefined || raw === null) return {};
   if (typeof raw !== "object" || Array.isArray(raw)) {
@@ -2900,8 +3145,8 @@ function readTimesheetOverrides(payload) {
   return out;
 }
 
-// hasOverride says whether the teacher sent a value for one field (see readTimesheetOverrides).
-function hasOverride(overrides, key) {
+// hasOverride_ says whether the teacher sent a value for one field (see readTimesheetOverrides_).
+function hasOverride_(overrides, key) {
   return Object.prototype.hasOwnProperty.call(overrides, key);
 }
 
@@ -2913,18 +3158,18 @@ function hasOverride(overrides, key) {
  * Builds the A-G row for one lesson plus everything the preview shows. Used by both
  * preview-timesheet-row and add-timesheet-row, so what the teacher previews is what gets written.
  */
-// planTimesheetRow works out the row for one lesson: which tab, the seven values for columns A to
+// planTimesheetRow_ works out the row for one lesson: which tab, the seven values for columns A to
 // G, whether a term label row goes above it, whether the lesson is already on the tab, and a list
 // of plain-English warnings. Values the teacher changed in the preview window win over the
 // script's own suggestions.
-function planTimesheetRow(ctx, overrides) {
+function planTimesheetRow_(ctx, overrides) {
   var row = ctx.found.row;
   var warnings = [];
   // Short notes like "Total Hours 1.5", reused in the error message if Google refuses the row.
   var notOnList = [];
 
   // The dropdown choices, read fresh from the lookup tabs.
-  var lists = readTimesheetLists(ctx.ts);
+  var lists = readTimesheetLists_(ctx.ts);
   lists.missingTabs.forEach(function (tabName) {
     warnings.push(
       'The time sheet has no "' + tabName + '" tab, so that column can\'t be checked against its dropdown list.'
@@ -2932,11 +3177,11 @@ function planTimesheetRow(ctx, overrides) {
   });
 
   // Which school-year tab and which term the lesson belongs to.
-  var tabName = schoolYearTabName(ctx.lessonDateKey);
-  var term = termFor(ctx.lessonDateKey);
-  var tab = findYearTab(ctx.ts, tabName);
-  var newest = tab ? null : newestYearTab(ctx.ts);
-  var tabRows = tab ? readYearTabRows(tab, ctx.tsTz) : [];
+  var tabName = schoolYearTabName_(ctx.lessonDateKey);
+  var term = termFor_(ctx.lessonDateKey);
+  var tab = findYearTab_(ctx.ts, tabName);
+  var newest = tab ? null : newestYearTab_(ctx.ts);
+  var tabRows = tab ? readYearTabRows_(tab, ctx.tsTz) : [];
   if (!tab && !newest) {
     warnings.push(
       "The time sheet has no school-year tab (like 2025-2026) to copy, so the tool can't create " +
@@ -2947,25 +3192,25 @@ function planTimesheetRow(ctx, overrides) {
   // Columns C and D: first and last name. The sign-up form's name wins; the Lesson Schedule's
   // Student Name is the backup. The name is split at its first space.
   var email = String(row["Student Email"] || "").trim().toLowerCase();
-  var fullName = getStudentNameMap()[email] || String(row["Student Name"] || "").trim();
-  var names = splitStudentName(fullName);
-  var namesTyped = hasOverride(overrides, "firstName") || hasOverride(overrides, "lastName");
-  var firstName = hasOverride(overrides, "firstName")
-    ? cleanCellText(String(overrides.firstName), "First name")
+  var fullName = getStudentNameMap_()[email] || String(row["Student Name"] || "").trim();
+  var names = splitStudentName_(fullName);
+  var namesTyped = hasOverride_(overrides, "firstName") || hasOverride_(overrides, "lastName");
+  var firstName = hasOverride_(overrides, "firstName")
+    ? cleanCellText_(String(overrides.firstName), "First name")
     : names.first;
-  var lastName = hasOverride(overrides, "lastName")
-    ? cleanCellText(String(overrides.lastName), "Last name")
+  var lastName = hasOverride_(overrides, "lastName")
+    ? cleanCellText_(String(overrides.lastName), "Last name")
     : names.last;
   if (!namesTyped && names.warning) warnings.push(names.warning);
 
   // Column F: total hours, from how long the lesson is (90 minutes is a double).
-  var minutes = lessonMinutes(row, ctx.studioTz);
+  var minutes = lessonMinutes_(row, ctx.studioTz);
   var hours;
-  if (hasOverride(overrides, "hours")) {
-    hours = listValueOrRaw(lists.values.hours, overrides.hours, "Total Hours");
+  if (hasOverride_(overrides, "hours")) {
+    hours = listValueOrRaw_(lists.values.hours, overrides.hours, "Total Hours");
   } else {
     var ninetyMinutes = minutes === TIMESHEET_DOUBLE_MINUTES;
-    hours = listValueOrRaw(
+    hours = listValueOrRaw_(
       lists.values.hours,
       ninetyMinutes ? TIMESHEET_DOUBLE_HOURS : TIMESHEET_REGULAR_HOURS,
       "Total Hours"
@@ -2982,19 +3227,19 @@ function planTimesheetRow(ctx, overrides) {
       );
     }
   }
-  var isDouble = sameListValue(hours, TIMESHEET_DOUBLE_HOURS);
+  var isDouble = sameListValue_(hours, TIMESHEET_DOUBLE_HOURS);
 
   // Column B: the lesson number, counted per student, per term, the way the time sheet does.
-  var count = countStudentLessons(tabRows, term, firstName, lastName);
+  var count = countStudentLessons_(tabRows, term, firstName, lastName);
   var lessonNo;
-  if (hasOverride(overrides, "lessonNo")) {
-    lessonNo = listValueOrRaw(lists.values.lessonNo, overrides.lessonNo, "Lesson No.");
+  if (hasOverride_(overrides, "lessonNo")) {
+    lessonNo = listValueOrRaw_(lists.values.lessonNo, overrides.lessonNo, "Lesson No.");
   } else if (isDouble) {
-    lessonNo = listValueOrRaw(lists.values.lessonNo, "Double", "Lesson No.");
+    lessonNo = listValueOrRaw_(lists.values.lessonNo, "Double", "Lesson No.");
   } else {
     var next = count.running + 1;
-    var highest = highestNumberOnList(lists.values.lessonNo) || 9;
-    var onList = findListItem(lists.values.lessonNo, next);
+    var highest = highestNumberOnList_(lists.values.lessonNo) || 9;
+    var onList = findListItem_(lists.values.lessonNo, next);
     if (next > highest || (!onList.found && lists.values.lessonNo.length > 0)) {
       // Past the end of the list: don't guess, let the teacher pick.
       lessonNo = "";
@@ -3008,7 +3253,7 @@ function planTimesheetRow(ctx, overrides) {
   }
   if (count.prior === 0) {
     warnings.push(
-      sameListValue(lessonNo, 1)
+      sameListValue_(lessonNo, 1)
         ? "No earlier lessons for this student this term, so this is lesson 1. If that's wrong, " +
           "the name may be spelled differently on the time sheet."
         : "No earlier lessons for this student this term. If that's wrong, the name may be " +
@@ -3018,28 +3263,28 @@ function planTimesheetRow(ctx, overrides) {
 
   // Column E: the block. "C Block" on the Lesson Schedule becomes "C" on the time sheet.
   var block;
-  if (hasOverride(overrides, "block")) {
-    block = listValueOrRaw(lists.values.block, overrides.block, "Block");
+  if (hasOverride_(overrides, "block")) {
+    block = listValueOrRaw_(lists.values.block, overrides.block, "Block");
   } else {
-    var mappedBlock = mapBlockToList(row["Lesson Block"], lists.values.block);
+    var mappedBlock = mapBlockToList_(row["Lesson Block"], lists.values.block);
     block = mappedBlock.value;
     if (mappedBlock.warning) warnings.push(mappedBlock.warning);
   }
 
   // Column G: the music subject, from the instrument on the student's latest sign-up form.
   var subject;
-  if (hasOverride(overrides, "subject")) {
-    subject = listValueOrRaw(lists.values.instrument, overrides.subject, "Music Subject");
+  if (hasOverride_(overrides, "subject")) {
+    subject = listValueOrRaw_(lists.values.instrument, overrides.subject, "Music Subject");
   } else {
-    var mappedSubject = mapInstrumentToList(formInstrumentAnswer(email), lists.values.instrument);
+    var mappedSubject = mapInstrumentToList_(formInstrumentAnswer_(email), lists.values.instrument);
     subject = mappedSubject.value;
     if (mappedSubject.warning) warnings.push(mappedSubject.warning);
   }
 
   // Check every dropdown value against its list, so nothing surprising reaches the time sheet.
-  checkOnList("Lesson No.", lessonNo, lists.values.lessonNo, warnings, notOnList);
-  checkOnList("Block", block, lists.values.block, warnings, notOnList);
-  if (hours !== "" && lists.values.hours.length > 0 && !findListItem(lists.values.hours, hours).found) {
+  checkOnList_("Lesson No.", lessonNo, lists.values.lessonNo, warnings, notOnList);
+  checkOnList_("Block", block, lists.values.block, warnings, notOnList);
+  if (hours !== "" && lists.values.hours.length > 0 && !findListItem_(lists.values.hours, hours).found) {
     notOnList.push("Total Hours " + hours);
     warnings.push(
       isDouble
@@ -3049,22 +3294,22 @@ function planTimesheetRow(ctx, overrides) {
         : 'Total Hours "' + hours + "\" isn't on the time sheet's hours list."
     );
   }
-  checkOnList("Music Subject", subject, lists.values.instrument, warnings, notOnList);
+  checkOnList_("Music Subject", subject, lists.values.instrument, warnings, notOnList);
 
   // If columns C and D use Mr. O'Neal's First Name / Last Name lists as dropdowns, a new
   // student won't be on them yet. That's only a warning; it never blocks adding.
   if (tab) {
-    nameListWarnings(tab, tabRows, firstName, lastName).forEach(function (w) {
+    nameListWarnings_(tab, tabRows, firstName, lastName).forEach(function (w) {
       warnings.push(w.message);
       notOnList.push(w.note);
     });
   }
 
   // Is this lesson already on the tab (same date, same student)? Then nothing will be appended.
-  var duplicateRow = findDuplicateRow(tabRows, ctx.lessonDateKey, firstName, lastName);
+  var duplicateRow = findDuplicateRow_(tabRows, ctx.lessonDateKey, firstName, lastName);
   var duplicate = null;
   if (duplicateRow) {
-    duplicate = { rowNumber: duplicateRow.rowNumber, cells: displayCells(duplicateRow.cells, ctx.tsTz) };
+    duplicate = { rowNumber: duplicateRow.rowNumber, cells: displayCells_(duplicateRow.cells, ctx.tsTz) };
     warnings.unshift(
       "This lesson is already on " + tabName + " (row " + duplicateRow.rowNumber + "). Adding " +
       "won't create a second row; it only marks the lesson as added."
@@ -3085,10 +3330,10 @@ function planTimesheetRow(ctx, overrides) {
     insertBefore: newest ? String(newest.getName()) : null,
     term: term,
     termLabel: term.label,
-    addsTermLabel: !duplicate && needsTermLabel(tabRows, term),
+    addsTermLabel: !duplicate && needsTermLabel_(tabRows, term),
     lessonDateKey: ctx.lessonDateKey,
     fields: fields,
-    cells: [displayDateFromKey(ctx.lessonDateKey), lessonNo, firstName, lastName, block, hours, subject],
+    cells: [displayDateFromKey_(ctx.lessonDateKey), lessonNo, firstName, lastName, block, hours, subject],
     duplicate: duplicate,
     warnings: warnings,
     notOnList: notOnList,
@@ -3098,25 +3343,25 @@ function planTimesheetRow(ctx, overrides) {
       studentEmail: email,
       studentName: fullName,
       lessonDate: ctx.lessonDateKey,
-      startTime: clockText(row["Start Time"], ctx.studioTz),
-      endTime: clockText(row["End Time"], ctx.studioTz),
+      startTime: clockText_(row["Start Time"], ctx.studioTz),
+      endTime: clockText_(row["End Time"], ctx.studioTz),
       lessonBlock: String(row["Lesson Block"] || "").trim(),
       minutes: minutes
     }
   };
 }
 
-// checkOnList adds a warning when a filled-in dropdown value isn't one of its list's choices.
-function checkOnList(label, value, list, warnings, notOnList) {
+// checkOnList_ adds a warning when a filled-in dropdown value isn't one of its list's choices.
+function checkOnList_(label, value, list, warnings, notOnList) {
   if (value === "" || list.length === 0) return;
-  if (findListItem(list, value).found) return;
+  if (findListItem_(list, value).found) return;
   notOnList.push(label + " " + value);
   warnings.push(label + ' "' + value + "\" isn't on the time sheet's " + label + " list.");
 }
 
-// splitStudentName splits a full name at its first space into a first and last name, with a
+// splitStudentName_ splits a full name at its first space into a first and last name, with a
 // warning when the name isn't exactly two words (or is missing).
-function splitStudentName(fullName) {
+function splitStudentName_(fullName) {
   var clean = String(fullName || "").trim().replace(/\s+/g, " ");
   if (!clean) {
     return {
@@ -3147,11 +3392,11 @@ function splitStudentName(fullName) {
   };
 }
 
-// lessonMinutes works out how long a lesson is, in minutes, from its start and end times. It
+// lessonMinutes_ works out how long a lesson is, in minutes, from its start and end times. It
 // gives back nothing (null) if either time is missing or unreadable.
-function lessonMinutes(row, tz) {
-  var start = parseWallClockTime(clockText(row["Start Time"], tz));
-  var end = parseWallClockTime(clockText(row["End Time"], tz));
+function lessonMinutes_(row, tz) {
+  var start = parseWallClockTime_(clockText_(row["Start Time"], tz));
+  var end = parseWallClockTime_(clockText_(row["End Time"], tz));
   if (!start || !end) return null;
   var minutes = (end.h * 60 + end.m) - (start.h * 60 + start.m);
   // A lesson that runs past midnight (rare) ends "earlier" than it starts; add a day.
@@ -3159,17 +3404,17 @@ function lessonMinutes(row, tz) {
   return minutes;
 }
 
-// clockText turns a time cell into text like "3:30 PM". Most times already arrive as text; a
+// clockText_ turns a time cell into text like "3:30 PM". Most times already arrive as text; a
 // cell that holds a full date and time is shown in the given time zone.
-function clockText(value, tz) {
+function clockText_(value, tz) {
   if (value instanceof Date) return Utilities.formatDate(value, tz, "h:mm a");
   return String(value === null || value === undefined ? "" : value).trim();
 }
 
-// mapBlockToList turns the Lesson Schedule's block (like "C Block") into the time sheet's Block
+// mapBlockToList_ turns the Lesson Schedule's block (like "C Block") into the time sheet's Block
 // choice (like "C"). A value that is already on the list passes straight through. Anything else
 // is left blank with a warning, so the teacher picks it.
-function mapBlockToList(raw, list) {
+function mapBlockToList_(raw, list) {
   var text = String(raw === null || raw === undefined ? "" : raw).trim();
   if (!text) {
     return {
@@ -3177,12 +3422,12 @@ function mapBlockToList(raw, list) {
       warning: "This lesson has no Lesson Block on the Lesson Schedule, so Block is blank. Pick one."
     };
   }
-  var exact = findListItem(list, text);
+  var exact = findListItem_(list, text);
   if (exact.found) return { value: exact.value };
   // "C Block" → "C", "Lunch Block" → "Lunch".
   var withoutWord = text.replace(/\s+block\s*$/i, "");
   if (withoutWord !== text) {
-    var stripped = findListItem(list, withoutWord);
+    var stripped = findListItem_(list, withoutWord);
     if (stripped.found) return { value: stripped.value };
   }
   if (list.length === 0) return { value: withoutWord };
@@ -3193,11 +3438,11 @@ function mapBlockToList(raw, list) {
   };
 }
 
-// mapInstrumentToList turns the instrument a student wrote on the sign-up form into one of the
+// mapInstrumentToList_ turns the instrument a student wrote on the sign-up form into one of the
 // time sheet's Music Subject choices: "electric guitar" → Guitar, "bass guitar" → Bass. When it
 // can't tell (no answer, an instrument that isn't on the list, or two different instruments), it
 // leaves the cell blank with a warning, so the teacher picks.
-function mapInstrumentToList(answer, list) {
+function mapInstrumentToList_(answer, list) {
   var text = String(answer || "").trim();
   if (!text) {
     return {
@@ -3206,16 +3451,16 @@ function mapInstrumentToList(answer, list) {
     };
   }
   if (list.length === 0) return { value: "" };
-  var exact = findListItem(list, text);
+  var exact = findListItem_(list, text);
   if (exact.found) return { value: exact.value };
 
   // Look for each choice as a whole word in the answer ("uke" counts as "ukulele").
-  var lower = " " + listKey(text).replace(/\buke\b/g, "ukulele") + " ";
+  var lower = " " + listKey_(text).replace(/\buke\b/g, "ukulele") + " ";
   var hits = [];
   list.forEach(function (item) {
-    var word = listKey(item);
+    var word = listKey_(item);
     if (!word) return;
-    var match = new RegExp("[^a-z0-9]" + escapeRegExp(word) + "[^a-z0-9]").exec(lower);
+    var match = new RegExp("[^a-z0-9]" + escapeRegExp_(word) + "[^a-z0-9]").exec(lower);
     if (match) hits.push({ item: item, index: match.index + 1, word: word });
   });
   hits.sort(function (a, b) { return a.index - b.index; });
@@ -3234,9 +3479,9 @@ function mapInstrumentToList(answer, list) {
   };
 }
 
-// formInstrumentAnswer finds what a student wrote for "What instrument do you want to play?" on
+// formInstrumentAnswer_ finds what a student wrote for "What instrument do you want to play?" on
 // their latest sign-up form (a later non-blank answer replaces an earlier one).
-function formInstrumentAnswer(email) {
+function formInstrumentAnswer_(email) {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Form Responses 1");
   if (!sheet) return "";
   var data = sheet.getDataRange().getValues();
@@ -3269,11 +3514,11 @@ function formInstrumentAnswer(email) {
 // Phase 6 — the time sheet's tabs and rows
 // ──────────────────────────────────────────────────────────────────────
 
-// termFor says which school term a date (like "2026-10-05") falls in. Fall is Aug 1 to Nov 30,
+// termFor_ says which school term a date (like "2026-10-05") falls in. Fall is Aug 1 to Nov 30,
 // Winter is Dec 1 to the end of February, Spring is Mar 1 to Jul 31. It gives back the school
 // year's first year, the term's name, an ID for comparing, and the label for a term label row:
 // "Fall 2026", "Winter 2026-27", or "Spring 2027".
-function termFor(dateKey) {
+function termFor_(dateKey) {
   var year = Number(dateKey.substring(0, 4));
   var month = Number(dateKey.substring(5, 7));
   // August to December belong to the school year starting this year; January to July to the
@@ -3290,16 +3535,16 @@ function termFor(dateKey) {
   return { schoolYearStart: start, name: name, id: start + " " + name, label: label };
 }
 
-// schoolYearTabName gives the name of the school-year tab a date belongs to: August to December
+// schoolYearTabName_ gives the name of the school-year tab a date belongs to: August to December
 // of 2026 → "2026-2027", January to July of 2027 → "2026-2027".
-function schoolYearTabName(dateKey) {
-  var start = termFor(dateKey).schoolYearStart;
+function schoolYearTabName_(dateKey) {
+  var start = termFor_(dateKey).schoolYearStart;
   return start + "-" + (start + 1);
 }
 
-// findYearTab finds a school-year tab by its exact name (surrounding spaces ignored). It never
+// findYearTab_ finds a school-year tab by its exact name (surrounding spaces ignored). It never
 // matches by "starts with" or "contains", because the CHAPEL/MISC. tab names hold the year too.
-function findYearTab(ss, name) {
+function findYearTab_(ss, name) {
   var sheets = ss.getSheets();
   for (var i = 0; i < sheets.length; i++) {
     if (String(sheets[i].getName()).trim() === name) return sheets[i];
@@ -3307,9 +3552,9 @@ function findYearTab(ss, name) {
   return null;
 }
 
-// newestYearTab finds the newest school-year tab: the one named like "2025-2026" with the
+// newestYearTab_ finds the newest school-year tab: the one named like "2025-2026" with the
 // latest years. CHAPEL/MISC. tabs never count. Gives back nothing (null) if there is none.
-function newestYearTab(ss) {
+function newestYearTab_(ss) {
   var best = null;
   var bestYear = -1;
   ss.getSheets().forEach(function (sheet) {
@@ -3323,27 +3568,27 @@ function newestYearTab(ss) {
   return best;
 }
 
-// findSheetByLooseName finds a tab by name: an exact match first, then one that differs only in
+// findSheetByLooseName_ finds a tab by name: an exact match first, then one that differs only in
 // capital letters or surrounding spaces. Used for the lookup tabs, whose names hold no year.
-function findSheetByLooseName(ss, name) {
+function findSheetByLooseName_(ss, name) {
   var sheets = ss.getSheets();
   for (var i = 0; i < sheets.length; i++) {
     if (sheets[i].getName() === name) return sheets[i];
   }
   for (var j = 0; j < sheets.length; j++) {
-    if (listKey(sheets[j].getName()) === listKey(name)) return sheets[j];
+    if (listKey_(sheets[j].getName()) === listKey_(name)) return sheets[j];
   }
   return null;
 }
 
-// readTimesheetLists reads every dropdown list from the time sheet's lookup tabs: the non-blank
+// readTimesheetLists_ reads every dropdown list from the time sheet's lookup tabs: the non-blank
 // cells in column A, exactly as they are (a number stays a number). It also names any lookup tab
 // that is missing.
-function readTimesheetLists(ts) {
+function readTimesheetLists_(ts) {
   var values = {};
   var missingTabs = [];
   Object.keys(TIMESHEET_LIST_TABS).forEach(function (key) {
-    var sheet = findSheetByLooseName(ts, TIMESHEET_LIST_TABS[key]);
+    var sheet = findSheetByLooseName_(ts, TIMESHEET_LIST_TABS[key]);
     if (!sheet) {
       values[key] = [];
       missingTabs.push(TIMESHEET_LIST_TABS[key]);
@@ -3361,10 +3606,10 @@ function readTimesheetLists(ts) {
   return { values: values, missingTabs: missingTabs };
 }
 
-// readYearTabRows reads columns A to G of every row below the title row of a school-year tab.
+// readYearTabRows_ reads columns A to G of every row below the title row of a school-year tab.
 // For each row it notes the row number, the date in column A as year-month-day (or nothing for
 // label rows like "Fall 2025" or "Week 1", and for blank rows), the lesson number, and the name.
-function readYearTabRows(sheet, tz) {
+function readYearTabRows_(sheet, tz) {
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return [];
   var values = sheet.getRange(2, 1, lastRow - 1, TIMESHEET_WRITE_COLUMNS).getValues();
@@ -3372,7 +3617,7 @@ function readYearTabRows(sheet, tz) {
     return {
       rowNumber: i + 2,
       a: cells[0],
-      dateKey: timesheetDateKey(cells[0], tz),
+      dateKey: timesheetDateKey_(cells[0], tz),
       lessonNo: cells[1],
       first: cells[2],
       last: cells[3],
@@ -3381,48 +3626,48 @@ function readYearTabRows(sheet, tz) {
   });
 }
 
-// timesheetDateKey reads column A of a time sheet row as a date, written year-month-day. A real
+// timesheetDateKey_ reads column A of a time sheet row as a date, written year-month-day. A real
 // date counts (read in the time sheet's own time zone), and so does text like "9/10/2026".
 // Anything else (a label like "Week 1", or a blank) gives back nothing (null).
-function timesheetDateKey(value, tz) {
+function timesheetDateKey_(value, tz) {
   if (value instanceof Date) {
     if (isNaN(value.getTime()) || value.getFullYear() < 1900) return null;
     return Utilities.formatDate(value, tz, "yyyy-MM-dd");
   }
-  if (typeof value === "string") return dateKeyFromSlashDate(value);
+  if (typeof value === "string") return dateKeyFromSlashDate_(value);
   return null;
 }
 
-// countStudentLessons follows the time sheet's own numbering for one student in one term. It
+// countStudentLessons_ follows the time sheet's own numbering for one student in one term. It
 // walks the student's rows in that term from top to bottom, starting at 0: a number n sets the
 // count to n, "Double" adds 2, and "No Show", "Late Cancel" or a blank leave it alone. The next
 // lesson is that count plus 1. It also counts how many of the student's rows it saw.
-function countStudentLessons(rows, term, first, last) {
+function countStudentLessons_(rows, term, first, last) {
   var running = 0;
   var prior = 0;
-  if (!nameKey(first) && !nameKey(last)) return { running: 0, prior: 0 };
+  if (!nameKey_(first) && !nameKey_(last)) return { running: 0, prior: 0 };
   rows.forEach(function (r) {
-    if (!r.dateKey || termFor(r.dateKey).id !== term.id) return;
-    if (!sameStudentName(r, first, last)) return;
+    if (!r.dateKey || termFor_(r.dateKey).id !== term.id) return;
+    if (!sameStudentName_(r, first, last)) return;
     prior++;
-    var n = lessonNumberValue(r.lessonNo);
+    var n = lessonNumberValue_(r.lessonNo);
     if (n !== null) {
       running = n;
-    } else if (listKey(r.lessonNo) === "double") {
+    } else if (listKey_(r.lessonNo) === "double") {
       running += 2;
     }
   });
   return { running: running, prior: prior };
 }
 
-// needsTermLabel decides whether a term label row (like "Fall 2026") goes above the new row: yes
+// needsTermLabel_ decides whether a term label row (like "Fall 2026") goes above the new row: yes
 // when no row on the tab is dated in that term yet, unless the teacher already typed a label for
 // that term below the last dated row (like "Winter TERM").
-function needsTermLabel(rows, term) {
+function needsTermLabel_(rows, term) {
   var lastDated = -1;
   for (var i = 0; i < rows.length; i++) {
     if (!rows[i].dateKey) continue;
-    if (termFor(rows[i].dateKey).id === term.id) return false;
+    if (termFor_(rows[i].dateKey).id === term.id) return false;
     lastDated = i;
   }
   var word = new RegExp("\\b" + term.name.toLowerCase() + "\\b");
@@ -3435,48 +3680,48 @@ function needsTermLabel(rows, term) {
   return true;
 }
 
-// findDuplicateRow finds a row on the tab with the same date and the same student (first and
+// findDuplicateRow_ finds a row on the tab with the same date and the same student (first and
 // last name, ignoring capitals and extra spaces). Gives back that row, or nothing (null).
-function findDuplicateRow(rows, dateKey, first, last) {
-  if (!nameKey(first) && !nameKey(last)) return null;
+function findDuplicateRow_(rows, dateKey, first, last) {
+  if (!nameKey_(first) && !nameKey_(last)) return null;
   for (var i = 0; i < rows.length; i++) {
-    if (rows[i].dateKey === dateKey && sameStudentName(rows[i], first, last)) return rows[i];
+    if (rows[i].dateKey === dateKey && sameStudentName_(rows[i], first, last)) return rows[i];
   }
   return null;
 }
 
-// sameStudentName says whether a time sheet row is for the given student (first + last name,
+// sameStudentName_ says whether a time sheet row is for the given student (first + last name,
 // trimmed, ignoring capital letters).
-function sameStudentName(row, first, last) {
-  return nameKey(row.first) === nameKey(first) && nameKey(row.last) === nameKey(last);
+function sameStudentName_(row, first, last) {
+  return nameKey_(row.first) === nameKey_(first) && nameKey_(row.last) === nameKey_(last);
 }
 
-// nameKey tidies a name for comparing: no outside spaces, single inside spaces, lowercase.
-function nameKey(value) {
+// nameKey_ tidies a name for comparing: no outside spaces, single inside spaces, lowercase.
+function nameKey_(value) {
   return String(value === null || value === undefined ? "" : value).trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-// lessonNumberValue reads a Lesson No. cell as a number (1, or the text "1"), or gives back
+// lessonNumberValue_ reads a Lesson No. cell as a number (1, or the text "1"), or gives back
 // nothing (null) for "Double", "No Show", "Late Cancel", a blank, and anything else.
-function lessonNumberValue(value) {
+function lessonNumberValue_(value) {
   if (typeof value === "number" && isFinite(value)) return value;
   var text = String(value === null || value === undefined ? "" : value).trim();
   return /^\d+$/.test(text) ? Number(text) : null;
 }
 
-// highestNumberOnList gives the biggest number on a list (9 for the Lesson No. list), or 0 if
+// highestNumberOnList_ gives the biggest number on a list (9 for the Lesson No. list), or 0 if
 // the list holds no numbers.
-function highestNumberOnList(list) {
+function highestNumberOnList_(list) {
   var highest = 0;
   list.forEach(function (item) {
-    var n = lessonNumberValue(item);
+    var n = lessonNumberValue_(item);
     if (n !== null && n > highest) highest = n;
   });
   return highest;
 }
 
-// displayCells turns a row's A to G values into what the time sheet shows: dates as M/d/yyyy.
-function displayCells(cells, tz) {
+// displayCells_ turns a row's A to G values into what the time sheet shows: dates as M/d/yyyy.
+function displayCells_(cells, tz) {
   return cells.map(function (value) {
     return value instanceof Date ? Utilities.formatDate(value, tz, "M/d/yyyy") : value;
   });
@@ -3486,17 +3731,17 @@ function displayCells(cells, tz) {
 // Phase 6 — dropdown lists
 // ──────────────────────────────────────────────────────────────────────
 
-// listKey tidies a value for comparing with a list choice: text, trimmed, single spaces,
+// listKey_ tidies a value for comparing with a list choice: text, trimmed, single spaces,
 // lowercase. So "1PM Shadow Block" matches the list's "1PM  Shadow Block" (two spaces).
-function listKey(value) {
+function listKey_(value) {
   return String(value === null || value === undefined ? "" : value).trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-// sameListValue says whether two values mean the same choice: the same text (see listKey), or
+// sameListValue_ says whether two values mean the same choice: the same text (see listKey_), or
 // the same number (so 1 matches "1", and 0.75 matches "0.75").
-function sameListValue(a, b) {
-  var ka = listKey(a);
-  var kb = listKey(b);
+function sameListValue_(a, b) {
+  var ka = listKey_(a);
+  var kb = listKey_(b);
   if (ka === kb) return true;
   if (ka === "" || kb === "") return false;
   var na = Number(ka);
@@ -3504,51 +3749,51 @@ function sameListValue(a, b) {
   return isFinite(na) && isFinite(nb) && na === nb;
 }
 
-// findListItem looks for a value on a dropdown list. It gives back { found: true, value } with
+// findListItem_ looks for a value on a dropdown list. It gives back { found: true, value } with
 // the list's own copy of the choice (so the exact text, and a number stays a number), or
 // { found: false }.
-function findListItem(list, value) {
+function findListItem_(list, value) {
   for (var i = 0; i < list.length; i++) {
-    if (sameListValue(list[i], value)) return { found: true, value: list[i] };
+    if (sameListValue_(list[i], value)) return { found: true, value: list[i] };
   }
   return { found: false };
 }
 
-// listValueOrRaw gives back the list's own copy of a choice when the value is on the list, so it
+// listValueOrRaw_ gives back the list's own copy of a choice when the value is on the list, so it
 // is written exactly as the dropdown expects. Otherwise it gives back the value as typed (text
 // that looks like a number becomes a number, the way Sheets treats typing). Blank stays blank.
-function listValueOrRaw(list, value, label) {
+function listValueOrRaw_(list, value, label) {
   if (typeof value === "string" && value.trim() === "") return "";
-  var match = findListItem(list, value);
+  var match = findListItem_(list, value);
   if (match.found) return match.value;
   if (typeof value === "number") {
     if (!isFinite(value)) throw new Error(label + " must be a number or a choice from its list.");
     return value;
   }
-  var text = cleanCellText(String(value), label);
+  var text = cleanCellText_(String(value), label);
   return /^-?\d+(\.\d+)?$/.test(text) ? Number(text) : text;
 }
 
-// cleanCellText checks text the teacher typed before it goes on the time sheet: trimmed, not
+// cleanCellText_ checks text the teacher typed before it goes on the time sheet: trimmed, not
 // too long, and never starting with "=" (which Sheets would treat as a formula).
-function cleanCellText(text, label) {
+function cleanCellText_(text, label) {
   var clean = String(text).trim();
   if (clean.length > 80) throw new Error(label + " is too long (80 characters at most).");
   if (clean.charAt(0) === "=") throw new Error(label + ' can\'t start with "=".');
   return clean;
 }
 
-// escapeRegExp makes text safe to search for inside a pattern (so "1PM" or "Dept." match
+// escapeRegExp_ makes text safe to search for inside a pattern (so "1PM" or "Dept." match
 // literally).
-function escapeRegExp(text) {
+function escapeRegExp_(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// nameListWarnings checks the tab's first-name and last-name columns (C and D). Only if their
+// nameListWarnings_ checks the tab's first-name and last-name columns (C and D). Only if their
 // dropdowns use Mr. O'Neal's First Name / Last Name tabs does it compare the student's name with
 // those lists, and only to warn: a new student won't be on them yet. The tool never writes to
 // those tabs. It gives back { message, note } pairs.
-function nameListWarnings(tab, rows, first, last) {
+function nameListWarnings_(tab, rows, first, last) {
   var out = [];
   var dataRow = null;
   for (var i = rows.length - 1; i >= 0; i--) {
@@ -3563,15 +3808,15 @@ function nameListWarnings(tab, rows, first, last) {
     { column: 4, letter: "D", tabName: TIMESHEET_LAST_NAME_TAB, name: last }
   ].forEach(function (spec) {
     if (!spec.name) return;
-    var listRange = validationListRange(tab.getRange(dataRow.rowNumber, spec.column).getDataValidation());
-    if (!listRange || listKey(listRange.getSheet().getName()) !== listKey(spec.tabName)) return;
+    var listRange = validationListRange_(tab.getRange(dataRow.rowNumber, spec.column).getDataValidation());
+    if (!listRange || listKey_(listRange.getSheet().getName()) !== listKey_(spec.tabName)) return;
     var names = [];
     listRange.getValues().forEach(function (r) {
       r.forEach(function (v) {
         if (v !== "" && v !== null) names.push(v);
       });
     });
-    if (findListItem(names, spec.name).found) return;
+    if (findListItem_(names, spec.name).found) return;
     out.push({
       message: '"' + spec.name + '" isn\'t on the ' + spec.tabName + " list that column " +
         spec.letter + "'s dropdown uses (normal for a new student). Add it to the " +
@@ -3582,9 +3827,9 @@ function nameListWarnings(tab, rows, first, last) {
   return out;
 }
 
-// validationListRange gives back the cells a dropdown takes its choices from, when the dropdown
+// validationListRange_ gives back the cells a dropdown takes its choices from, when the dropdown
 // is the "from a range" kind. Otherwise (no dropdown, or a typed-in list) it gives back nothing.
-function validationListRange(rule) {
+function validationListRange_(rule) {
   if (!rule) return null;
   try {
     if (rule.getCriteriaType() !== SpreadsheetApp.DataValidationCriteria.VALUE_IN_RANGE) return null;
@@ -3599,16 +3844,16 @@ function validationListRange(rule) {
 // Phase 6 — writing
 // ──────────────────────────────────────────────────────────────────────
 
-// appendTimesheetRow writes the planned row directly below the last used row of the school-year
+// appendTimesheetRow_ writes the planned row directly below the last used row of the school-year
 // tab (creating the tab first if this is the school year's first lesson). When the lesson starts
 // a new term, the term label row goes in just above it. Both rows go in with one write, columns A
 // to G only. Column A gets a real date with the M/d/yyyy format, made in the time sheet's own
 // time zone so it can't land a day early. It gives back the lesson's row number.
-function appendTimesheetRow(ctx, plan) {
-  var sheet = findYearTab(ctx.ts, plan.tab);
+function appendTimesheetRow_(ctx, plan) {
+  var sheet = findYearTab_(ctx.ts, plan.tab);
   var createdTab = false;
   if (!sheet) {
-    sheet = createYearTab(ctx.ts, plan.tab, ctx.tsTz);
+    sheet = createYearTab_(ctx.ts, plan.tab, ctx.tsTz);
     createdTab = true;
   }
 
@@ -3627,7 +3872,7 @@ function appendTimesheetRow(ctx, plan) {
 
   var firstRow = sheet.getLastRow() + 1;
   var lessonRow = firstRow + rows.length - 1;
-  ensureSheetRows(sheet, lessonRow);
+  ensureSheetRows_(sheet, lessonRow);
   sheet.getRange(lessonRow, 1).setNumberFormat("M/d/yyyy");
   try {
     sheet.getRange(firstRow, 1, rows.length, TIMESHEET_WRITE_COLUMNS).setValues(rows);
@@ -3635,7 +3880,7 @@ function appendTimesheetRow(ctx, plan) {
     // try, instead of later.
     SpreadsheetApp.flush();
   } catch (err) {
-    var problem = timesheetWriteProblem(err, plan, sheet, firstRow, rows.length);
+    var problem = timesheetWriteProblem_(err, plan, sheet, firstRow, rows.length);
     // The new tab itself stays (with its header and dropdowns); the next try reuses it.
     if (createdTab) {
       problem = problem.replace(
@@ -3652,9 +3897,9 @@ function appendTimesheetRow(ctx, plan) {
   };
 }
 
-// timesheetWriteProblem turns Google's error from a refused write into a plain-English message
+// timesheetWriteProblem_ turns Google's error from a refused write into a plain-English message
 // for the website: what went wrong, whether anything landed on the tab, and Google's own words.
-function timesheetWriteProblem(err, plan, sheet, firstRow, count) {
+function timesheetWriteProblem_(err, plan, sheet, firstRow, count) {
   var raw = String(err && err.message ? err.message : err).replace(/^Exception:\s*/, "");
   // Check whether any of it landed, so the message can say so honestly.
   var landed = false;
@@ -3684,12 +3929,12 @@ function timesheetWriteProblem(err, plan, sheet, firstRow, count) {
   return lead + outcome + " (Google said: " + raw + ")";
 }
 
-// createYearTab makes a new school-year tab (like "2026-2027") just before the newest existing
+// createYearTab_ makes a new school-year tab (like "2026-2027") just before the newest existing
 // one, copying from it: the title row with its formatting, the frozen rows and columns, the
 // column widths, and the dropdowns on columns B, E, F and G (taken from one of its lesson rows).
 // No lesson rows are copied.
-function createYearTab(ts, name, tz) {
-  var template = newestYearTab(ts);
+function createYearTab_(ts, name, tz) {
+  var template = newestYearTab_(ts);
   if (!template) {
     throw new Error(
       "The time sheet has no school-year tab (like 2025-2026) to copy, so the tool can't create " +
@@ -3710,7 +3955,7 @@ function createYearTab(ts, name, tz) {
     for (var c = 1; c <= lastCol; c++) {
       sheet.setColumnWidth(c, template.getColumnWidth(c));
     }
-    copyYearTabDropdowns(template, sheet, tz);
+    copyYearTabDropdowns_(template, sheet, tz);
     return sheet;
   } catch (err) {
     throw new Error(
@@ -3721,10 +3966,10 @@ function createYearTab(ts, name, tz) {
   }
 }
 
-// copyYearTabDropdowns copies the dropdowns of columns B, E, F and G from the template tab's
+// copyYearTabDropdowns_ copies the dropdowns of columns B, E, F and G from the template tab's
 // newest lesson row that has one, onto every row below the title on the new tab.
-function copyYearTabDropdowns(template, sheet, tz) {
-  var rows = readYearTabRows(template, tz);
+function copyYearTabDropdowns_(template, sheet, tz) {
+  var rows = readYearTabRows_(template, tz);
   if (rows.length === 0) return;
   [2, 5, 6, 7].forEach(function (column) {
     // One read per column: every row's dropdown rule for that column.
@@ -3737,17 +3982,17 @@ function copyYearTabDropdowns(template, sheet, tz) {
   });
 }
 
-// ensureSheetRows adds empty rows at the bottom of a tab if it has fewer than `needed` rows.
-function ensureSheetRows(sheet, needed) {
+// ensureSheetRows_ adds empty rows at the bottom of a tab if it has fewer than `needed` rows.
+function ensureSheetRows_(sheet, needed) {
   var maxRows = sheet.getMaxRows();
   if (maxRows < needed) sheet.insertRowsAfter(maxRows, needed - maxRows);
 }
 
-// writeTimesheetMark writes the note ("Added 10/7/2026" or "Skipped") into the lesson's Time
+// writeTimesheetMark_ writes the note ("Added 10/7/2026" or "Skipped") into the lesson's Time
 // Sheet cell on the Lesson Schedule, adding that column the first time.
-function writeTimesheetMark(found, text, tabName, rowNumber) {
+function writeTimesheetMark_(found, text, tabName, rowNumber) {
   try {
-    var column = ensureAutoManagedColumn(found.sheet, TIME_SHEET_COLUMN);
+    var column = ensureAutoManagedColumn_(found.sheet, TIME_SHEET_COLUMN);
     found.sheet.getRange(found.rowIndex, column).setValue(text);
     SpreadsheetApp.flush();
   } catch (err) {
@@ -3763,17 +4008,17 @@ function writeTimesheetMark(found, text, tabName, rowNumber) {
   }
 }
 
-// addedMarkText is the note for a lesson that is on the time sheet: "Added" and today's date in
+// addedMarkText_ is the note for a lesson that is on the time sheet: "Added" and today's date in
 // the studio spreadsheet's time zone, like "Added 10/7/2026".
-function addedMarkText(studioTz) {
+function addedMarkText_(studioTz) {
   return "Added " + Utilities.formatDate(new Date(), studioTz, "M/d/yyyy");
 }
 
-// isAddedMark and isSkippedMark read a lesson's Time Sheet note.
-function isAddedMark(mark) {
+// isAddedMark_ and isSkippedMark_ read a lesson's Time Sheet note.
+function isAddedMark_(mark) {
   return /^added\b/i.test(String(mark || "").trim());
 }
-function isSkippedMark(mark) {
+function isSkippedMark_(mark) {
   return /^skipped$/i.test(String(mark || "").trim());
 }
 
@@ -3781,26 +4026,26 @@ function isSkippedMark(mark) {
 // Phase 6 — dates
 // ──────────────────────────────────────────────────────────────────────
 
-// dateKeyFromLessonCell reads a Lesson Schedule date as year-month-day text ("2026-10-05"). It
+// dateKeyFromLessonCell_ reads a Lesson Schedule date as year-month-day text ("2026-10-05"). It
 // takes a real date (read in the studio spreadsheet's time zone), "2026-10-05", or "10/5/2026".
-function dateKeyFromLessonCell(value, tz) {
+function dateKeyFromLessonCell_(value, tz) {
   if (value instanceof Date) return Utilities.formatDate(value, tz, "yyyy-MM-dd");
   var text = String(value === null || value === undefined ? "" : value).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return isValidDateKey(text) ? text : null;
-  return dateKeyFromSlashDate(text);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return isValidDateKey_(text) ? text : null;
+  return dateKeyFromSlashDate_(text);
 }
 
-// dateKeyFromSlashDate reads text like "9/10/2026" (month/day/year) as "2026-09-10", or gives back
+// dateKeyFromSlashDate_ reads text like "9/10/2026" (month/day/year) as "2026-09-10", or gives back
 // nothing (null) if it isn't a real date written that way.
-function dateKeyFromSlashDate(text) {
+function dateKeyFromSlashDate_(text) {
   var m = /^\s*(\d{1,2})\/(\d{1,2})\/(\d{4})\s*$/.exec(String(text));
   if (!m) return null;
-  return dateKeyFromParts(Number(m[3]), Number(m[1]), Number(m[2]));
+  return dateKeyFromParts_(Number(m[3]), Number(m[1]), Number(m[2]));
 }
 
-// dateKeyFromParts builds "yyyy-MM-dd" from a year, month and day, or gives back nothing (null)
+// dateKeyFromParts_ builds "yyyy-MM-dd" from a year, month and day, or gives back nothing (null)
 // for an impossible date like February 30.
-function dateKeyFromParts(year, month, day) {
+function dateKeyFromParts_(year, month, day) {
   var check = new Date(Date.UTC(year, month - 1, day));
   if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) {
     return null;
@@ -3808,14 +4053,14 @@ function dateKeyFromParts(year, month, day) {
   return year + "-" + (month < 10 ? "0" : "") + month + "-" + (day < 10 ? "0" : "") + day;
 }
 
-// isValidDateKey says whether text is a real date written year-month-day, like 2026-10-05.
-function isValidDateKey(text) {
+// isValidDateKey_ says whether text is a real date written year-month-day, like 2026-10-05.
+function isValidDateKey_(text) {
   var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(text || ""));
-  return !!m && dateKeyFromParts(Number(m[1]), Number(m[2]), Number(m[3])) === text;
+  return !!m && dateKeyFromParts_(Number(m[1]), Number(m[2]), Number(m[3])) === text;
 }
 
-// displayDateFromKey turns "2026-10-05" into "10/5/2026", the way the time sheet shows dates.
-function displayDateFromKey(key) {
+// displayDateFromKey_ turns "2026-10-05" into "10/5/2026", the way the time sheet shows dates.
+function displayDateFromKey_(key) {
   return Number(key.substring(5, 7)) + "/" + Number(key.substring(8, 10)) + "/" + key.substring(0, 4);
 }
 
@@ -3823,10 +4068,10 @@ function displayDateFromKey(key) {
 // Phase 6 — authorize() report
 // ──────────────────────────────────────────────────────────────────────
 
-// checkTimesheetForAuthorize opens the time sheet (so Google's permission prompt covers it) and
+// checkTimesheetForAuthorize_ opens the time sheet (so Google's permission prompt covers it) and
 // writes plain-English report lines for the authorize() log: "OK ..." when a setting works, or
 // "PROBLEM ..." with what to do. It never stops authorize().
-function checkTimesheetForAuthorize() {
+function checkTimesheetForAuthorize_() {
   var lines = [];
   var summary = { configured: false };
   var props = PropertiesService.getScriptProperties();
@@ -3839,29 +4084,29 @@ function checkTimesheetForAuthorize() {
       "PROBLEM " + TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + ": not set. Add it in Project " +
       "Settings → Script Properties (the time sheet's ID or its whole web address)."
     );
-  } else if (!spreadsheetIdFromSetting(rawId)) {
+  } else if (!spreadsheetIdFromSetting_(rawId)) {
     lines.push(
       "PROBLEM " + TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + ": doesn't look like a Google Sheets ID or link."
     );
   } else {
     var ts = null;
     try {
-      ts = SpreadsheetApp.openById(spreadsheetIdFromSetting(rawId));
+      ts = SpreadsheetApp.openById(spreadsheetIdFromSetting_(rawId));
     } catch (err) {
-      var me = effectiveUserEmail();
+      var me = effectiveUserEmail_();
       lines.push(
         "PROBLEM " + TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + ": can't open it: share the time " +
         "sheet as Editor with the Google account this script runs as" + (me ? " (" + me + ")" : "") +
-        "." + googleSaid(err)
+        "." + googleSaid_(err)
       );
     }
     if (ts) {
       try {
         var tz = ts.getSpreadsheetTimeZone();
-        var tabName = schoolYearTabName(Utilities.formatDate(new Date(), tz, "yyyy-MM-dd"));
+        var tabName = schoolYearTabName_(Utilities.formatDate(new Date(), tz, "yyyy-MM-dd"));
         var tabNote = "";
-        if (!findYearTab(ts, tabName)) {
-          var newest = newestYearTab(ts);
+        if (!findYearTab_(ts, tabName)) {
+          var newest = newestYearTab_(ts);
           tabNote = newest
             ? " (not there yet; it will be created just before " + newest.getName() + " on the first add)"
             : " (not there yet, and there's no school-year tab to copy; add it by hand)";
@@ -3869,7 +4114,7 @@ function checkTimesheetForAuthorize() {
         lines.push(
           "OK " + TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + ': "' + ts.getName() + '", tab ' + tabName + tabNote
         );
-        var lists = readTimesheetLists(ts);
+        var lists = readTimesheetLists_(ts);
         lines.push(
           "Time sheet lists: Lesson No. " + lists.values.lessonNo.length + ", Block " +
           lists.values.block.length + ", hours " + lists.values.hours.length + ", Instrument " +
@@ -3892,7 +4137,7 @@ function checkTimesheetForAuthorize() {
       "PROBLEM " + TIMESHEET_START_DATE_PROPERTY_KEY + ": not set. Add it in Project Settings → " +
       "Script Properties, written like 2026-10-05."
     );
-  } else if (!isValidDateKey(rawStart)) {
+  } else if (!isValidDateKey_(rawStart)) {
     lines.push(
       "PROBLEM " + TIMESHEET_START_DATE_PROPERTY_KEY + ': "' + rawStart + "\" isn't a date written like 2026-10-05."
     );
@@ -3904,9 +4149,9 @@ function checkTimesheetForAuthorize() {
   return { lines: lines, summary: summary };
 }
 
-// effectiveUserEmail gives the email of the Google account this script is running as, or "" if
+// effectiveUserEmail_ gives the email of the Google account this script is running as, or "" if
 // Google won't say.
-function effectiveUserEmail() {
+function effectiveUserEmail_() {
   try {
     return String(Session.getEffectiveUser().getEmail() || "");
   } catch (err) {
@@ -3926,6 +4171,13 @@ function effectiveUserEmail() {
 // It copies the student's answers onto their own tab (named after their email), creating the
 // tab the first time, then creates their personal Drive folder and shares the class folder.
 function onFormSubmit(e) {
+  // Only a real form-submit trigger may run this (see the SAFETY RULE above api). A real event
+  // carries the Sheet range the answers landed in; a web page can't fake one, because
+  // google.script.run can only pass plain data, never a working Range.
+  if (!e || !e.range || typeof e.range.getRow !== "function") {
+    throw new Error("onFormSubmit only runs from its form-submit trigger (Triggers → On form submit).");
+  }
+
   // Open the spreadsheet and the tab where form answers land, and read its column titles.
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const formSheet = ss.getSheetByName("Form Responses 1");
@@ -3974,11 +4226,11 @@ function onFormSubmit(e) {
   // If the tab is brand new, give it the studio's colors.
   if (createdNewTab) {
     try {
-      formatStudentTab(sheet);
+      formatStudentTab_(sheet);
     } catch (err) {
       // Formatting is cosmetic — never let a styling failure block the
       // submission from being recorded.
-      Logger.log("formatStudentTab failed for " + email + ": " + err);
+      Logger.log("formatStudentTab_ failed for " + email + ": " + err);
     }
   }
 
@@ -3988,15 +4240,15 @@ function onFormSubmit(e) {
   // not set, Drive quota, etc.) never blocks the submission from being
   // recorded — the bulk Sync handlers can backfill any failures.
   try {
-    ensureStudentFolder(email, studentName);
+    ensureStudentFolder_(email, studentName);
   } catch (err) {
-    Logger.log("ensureStudentFolder failed for " + email + ": " + err);
+    Logger.log("ensureStudentFolder_ failed for " + email + ": " + err);
   }
 
   try {
-    grantClassResourcesViewerForStudent(email);
+    grantClassResourcesViewerForStudent_(email);
   } catch (err) {
-    Logger.log("grantClassResourcesViewerForStudent failed for " + email + ": " + err);
+    Logger.log("grantClassResourcesViewerForStudent_ failed for " + email + ": " + err);
   }
 }
 
@@ -4008,10 +4260,10 @@ function onFormSubmit(e) {
  * three are conditions the bulk `sync-class-resources-access` handler
  * also tolerates, so this stays consistent with that flow.
  */
-// grantClassResourcesViewerForStudent lets one new student view the shared Class Resources
+// grantClassResourcesViewerForStudent_ lets one new student view the shared Class Resources
 // folder. It's called right after they submit the form. It quietly does nothing if the folder
 // isn't set up, the student already has access, or Google refuses; the Sync button can retry.
-function grantClassResourcesViewerForStudent(studentEmail) {
+function grantClassResourcesViewerForStudent_(studentEmail) {
   // Tidy the email and look up the saved folder ID. Stop quietly if either is missing.
   var normalized = String(studentEmail || "").trim().toLowerCase();
   if (!normalized) return;
@@ -4058,11 +4310,11 @@ function grantClassResourcesViewerForStudent(studentEmail) {
   try {
     folder.addViewer(normalized);
   } catch (err) {
-    // Same reasoning as applyStudentFolderPermissions: a single bad
+    // Same reasoning as applyStudentFolderPermissions_: a single bad
     // address shouldn't break the form-submit handler. Log and let
     // the bulk Sync handler retry later.
     Logger.log(
-      "grantClassResourcesViewerForStudent: addViewer(" + normalized +
+      "grantClassResourcesViewerForStudent_: addViewer(" + normalized +
       ") failed: " + (err && err.message ? err.message : err)
     );
   }
@@ -4131,10 +4383,10 @@ var MUSIC_STUDIO_SPREADSHEET_ID_PROPERTY_KEY = "MUSIC_STUDIO_SPREADSHEET_ID";
  * launched. Used by setup-time helpers that may run from the editor
  * before the runtime has an active-spreadsheet context.
  */
-// resolveMusicStudioSpreadsheet finds the studio spreadsheet. Normally the script already knows
+// resolveMusicStudioSpreadsheet_ finds the studio spreadsheet. Normally the script already knows
 // (it lives inside the Sheet); if not, it opens the Sheet using the backup ID from the settings
 // drawer, or stops with instructions if that isn't set.
-function resolveMusicStudioSpreadsheet() {
+function resolveMusicStudioSpreadsheet_() {
   // Normal case: the script is attached to the Sheet, so use that.
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   if (ss) return ss;
@@ -4172,14 +4424,17 @@ function resolveMusicStudioSpreadsheet() {
 // every tab in the studio spreadsheet with the studio's colors and adds "please don't edit"
 // warnings to the columns the website manages. Running it again is harmless.
 function setupSheetFormatting() {
+  // Only a person running it from the editor (see the SAFETY RULE above api).
+  requireEditorRun_("setupSheetFormatting");
+
   // Open the spreadsheet and start a list of which tabs were styled and which were skipped.
-  var ss = resolveMusicStudioSpreadsheet();
+  var ss = resolveMusicStudioSpreadsheet_();
   var summary = { formatted: [], skipped: [] };
 
   // Style the form-answers (roster) tab, if it exists.
   var roster = ss.getSheetByName("Form Responses 1");
   if (roster) {
-    formatRosterSheet(roster);
+    formatRosterSheet_(roster);
     summary.formatted.push("Form Responses 1");
   } else {
     summary.skipped.push("Form Responses 1 (not found)");
@@ -4188,7 +4443,7 @@ function setupSheetFormatting() {
   // Style the Lesson Schedule tab, including the warnings on the website-managed columns.
   var schedule = ss.getSheetByName(LESSON_SCHEDULE_SHEET_NAME);
   if (schedule) {
-    formatLessonScheduleSheet(schedule);
+    formatLessonScheduleSheet_(schedule);
     summary.formatted.push(LESSON_SCHEDULE_SHEET_NAME);
   } else {
     summary.skipped.push(LESSON_SCHEDULE_SHEET_NAME + " (not found)");
@@ -4197,7 +4452,7 @@ function setupSheetFormatting() {
   // Style the Lesson Recaps tab, if a recap has been saved yet.
   var recaps = ss.getSheetByName(LESSON_RECAPS_SHEET_NAME);
   if (recaps) {
-    formatLessonRecapsSheet(recaps);
+    formatLessonRecapsSheet_(recaps);
     summary.formatted.push(LESSON_RECAPS_SHEET_NAME);
   } else {
     summary.skipped.push(LESSON_RECAPS_SHEET_NAME + " (not created yet)");
@@ -4214,7 +4469,7 @@ function setupSheetFormatting() {
     if (name === LESSON_RECAPS_SHEET_NAME) continue;
     // Per-student tabs are named after the student's email.
     if (!/.+@.+\..+/.test(name)) continue;
-    formatStudentTab(s);
+    formatStudentTab_(s);
     summary.formatted.push(name);
   }
 
@@ -4232,9 +4487,9 @@ function setupSheetFormatting() {
  * frozen first row, alternating row banding in the Pomfret palette,
  * and a thin border under the header.
  */
-// applyBaseTableFormat gives one tab the studio's standard look: a bold crimson title row that
+// applyBaseTableFormat_ gives one tab the studio's standard look: a bold crimson title row that
 // stays pinned while scrolling, alternating row colors, and sensible column widths.
-function applyBaseTableFormat(sheet) {
+function applyBaseTableFormat_(sheet) {
   // Work out how many columns and rows the tab has (at least 1 column and 2 rows).
   var lastCol = Math.max(sheet.getLastColumn(), 1);
   var maxRows = Math.max(sheet.getMaxRows(), 2);
@@ -4291,20 +4546,20 @@ function applyBaseTableFormat(sheet) {
 
 /** Format the master roster (Form Responses 1) — base format only. */
 // Style the roster (form answers) tab with the standard look.
-function formatRosterSheet(sheet) {
-  applyBaseTableFormat(sheet);
+function formatRosterSheet_(sheet) {
+  applyBaseTableFormat_(sheet);
 }
 
 /** Format a per-student tab — base format only. */
 // Style one student's personal tab with the standard look.
-function formatStudentTab(sheet) {
-  applyBaseTableFormat(sheet);
+function formatStudentTab_(sheet) {
+  applyBaseTableFormat_(sheet);
 }
 
 /** Format the Lesson Recaps tab — base format only. */
 // Style the Lesson Recaps tab with the standard look.
-function formatLessonRecapsSheet(sheet) {
-  applyBaseTableFormat(sheet);
+function formatLessonRecapsSheet_(sheet) {
+  applyBaseTableFormat_(sheet);
 }
 
 /**
@@ -4316,14 +4571,14 @@ function formatLessonRecapsSheet(sheet) {
  * try). If a column is missing it is silently skipped — the formatting
  * is cosmetic and shouldn't block setup.
  */
-// formatLessonScheduleSheet styles the Lesson Schedule tab with the standard look, then marks
+// formatLessonScheduleSheet_ styles the Lesson Schedule tab with the standard look, then marks
 // the website-managed columns (Status, Calendar Event ID, Time Sheet) with muted colors and an
 // edit warning.
-function formatLessonScheduleSheet(sheet) {
+function formatLessonScheduleSheet_(sheet) {
   // Make sure the Calendar Event ID and Time Sheet columns exist, then apply the standard look.
-  ensureCalendarEventIdColumn(sheet);
-  ensureAutoManagedColumn(sheet, TIME_SHEET_COLUMN);
-  applyBaseTableFormat(sheet);
+  ensureCalendarEventIdColumn_(sheet);
+  ensureAutoManagedColumn_(sheet, TIME_SHEET_COLUMN);
+  applyBaseTableFormat_(sheet);
 
   // Read the column titles, then find and mark each website-managed column.
   var lastCol = Math.max(sheet.getLastColumn(), 1);
@@ -4331,10 +4586,10 @@ function formatLessonScheduleSheet(sheet) {
 
   for (var i = 0; i < AUTO_MANAGED_LESSON_COLUMNS.length; i++) {
     var name = AUTO_MANAGED_LESSON_COLUMNS[i];
-    var idx = headerIndex(headers, name);
+    var idx = headerIndex_(headers, name);
     if (idx === -1) continue;
-    highlightAutoManagedColumn(sheet, idx + 1, name);
-    protectAutoManagedColumn(sheet, idx + 1);
+    highlightAutoManagedColumn_(sheet, idx + 1, name);
+    protectAutoManagedColumn_(sheet, idx + 1);
   }
 }
 
@@ -4343,9 +4598,9 @@ function formatLessonScheduleSheet(sheet) {
  * data cells get a muted background + italic font so the teacher
  * immediately sees the column is "different".
  */
-// highlightAutoManagedColumn makes a website-managed column look different: a note on its title
+// highlightAutoManagedColumn_ makes a website-managed column look different: a note on its title
 // and gray-brown italic text below it, so the teacher can see it isn't meant for typing in.
-function highlightAutoManagedColumn(sheet, columnIndex, columnName) {
+function highlightAutoManagedColumn_(sheet, columnIndex, columnName) {
   var maxRows = Math.max(sheet.getMaxRows(), 2);
 
   // Attach the hover note to the column's title cell.
@@ -4372,9 +4627,9 @@ function highlightAutoManagedColumn(sheet, columnIndex, columnName) {
  * before adding a fresh one, so re-running setup never stacks up
  * duplicate protections on the same range.
  */
-// protectAutoManagedColumn puts a soft lock on a website-managed column: anyone who edits it
+// protectAutoManagedColumn_ puts a soft lock on a website-managed column: anyone who edits it
 // sees a warning box first. They can still go ahead, but the website may overwrite the change.
-function protectAutoManagedColumn(sheet, columnIndex) {
+function protectAutoManagedColumn_(sheet, columnIndex) {
   // Select every cell in the column below the title.
   var maxRows = Math.max(sheet.getMaxRows(), 2);
   var range = sheet.getRange(2, columnIndex, maxRows - 1, 1);

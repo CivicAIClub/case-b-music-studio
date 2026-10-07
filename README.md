@@ -44,6 +44,7 @@ Open the URL Vite prints (usually `http://localhost:5173`). To build a productio
 npm run build
 npm run preview   # optional local preview of the build
 npm test          # runs apps-script/Code.gs against pretend Google Sheets (made-up data)
+npm run build:gas # the Google-hosted page: one file, dist-gas/Index.html (see Hosting on Google)
 ```
 
 **Data:** The app loads **students and schedules from your Google Apps Script** (see API client comments). Mock data is not used for the live roster.
@@ -59,7 +60,7 @@ Every POST to the Apps Script web app must carry a `secret` field that matches t
 
 Vite inlines both values into the built JS, so anyone who opens the deployed site in DevTools can read the secret. That is the documented model for this single-teacher tool: treat the deployed URL as private and don't link it publicly. If the site ever needs to be public, move the secret behind a server-side proxy.
 
-> A Google Sign-In + email-allowlist design (ID token verified by Apps Script against an `ALLOWED_USER_EMAILS` list) was planned and documented earlier but is **not implemented** in the current code. Nothing reads `VITE_GOOGLE_OAUTH_CLIENT_ID` or `OAUTH_CLIENT_ID` today. Keep this in mind if you pick that work up.
+> Pomfret sign-in now comes from **[Hosting on Google](#hosting-on-google-pomfret-sign-in-only)**: the same site served by Apps Script, checked against the `ALLOWED_USERS` Script Property, with no shared secret in the page. The older Google Sign-In design (ID tokens checked against an `ALLOWED_USER_EMAILS` list) was never built; nothing reads `VITE_GOOGLE_OAUTH_CLIENT_ID` or `OAUTH_CLIENT_ID`.
 
 #### One-time `/exec` URL setup
 
@@ -75,7 +76,7 @@ After any change to `apps-script/Code.gs`, **redeploy a new version** (Manage de
 
 #### Who gets calendar invites
 
-`ALWAYS_INVITE_EMAILS` in `apps-script/Code.gs` lists the people invited to every lesson event in addition to the student (Mr. O'Neal, Dr. Burns, Cayden). Edit it, save, redeploy a new version. No frontend change needed.
+`ALWAYS_INVITE_EMAILS` in `apps-script/Code.gs` lists the people invited to every lesson event in addition to the student (Mr. O'Neal and Dr. Burns). Edit it, save, redeploy a new version. No frontend change needed.
 
 #### Sheet formatting (one-time)
 
@@ -86,7 +87,7 @@ After updating Code.gs in the editor, select `setupSheetFormatting` from the fun
 The Dashboard now shows a **Pending lessons** card for any row in the `Lesson Schedule` tab whose Status is blank (or `Draft`) **and** has no Calendar Event ID. Each row gets a **Preview & schedule** button that opens a modal showing the proposed event (title, time, attendees, description, target calendar). Confirming creates the event on the teacher's primary Google Calendar via `CalendarApp` and sends invites to:
 
 - the student's email (from the row),
-- everyone listed in `ALWAYS_INVITE_EMAILS` in `apps-script/Code.gs` (Mr. O'Neal, Dr. Burns, Cayden's two emails).
+- everyone listed in `ALWAYS_INVITE_EMAILS` in `apps-script/Code.gs` (Mr. O'Neal and Dr. Burns).
 
 The teacher can add or remove attendees inline in the preview modal before confirming — at least one attendee is required.
 
@@ -228,6 +229,31 @@ Mr. O'Neal is paid per private lesson and logs every lesson in a payroll time sh
 
 **Tests:** `npm test` runs `Code.gs` in Node (`node:test` and `node:vm`, no extra packages) against pretend Google Sheets with made-up data: lesson numbering, label rows and text dates, exact tab names, the new-tab path, block and instrument mapping, name splitting, duplicates and retries, the start-date cutoff, and that H and I are never written. CI runs it on every pull request.
 
+## Hosting on Google (Pomfret sign-in only)
+
+The same website can be served by the Apps Script itself, on a Pomfret-only Google link with Google sign-in, instead of on GitHub Pages with a shared password in the page. This is how Mr. O'Neal runs it after the handoff ([`docs/handoff.md`](docs/handoff.md)), and it works the same way as Case A's AutoPlanner.
+
+**How it works**
+
+- `npm run build:gas` builds the whole site into one self-contained file, `dist-gas/Index.html` (JavaScript, CSS and images inlined; never committed). In this build Vite reads no `VITE_*` values, so the `/exec` URL and the shared secret are never in the page (a test checks this).
+- In the Apps Script editor that file is the HTML file **Index**. `doGet` with nothing on the address serves it, titled "Music Studio", to anyone on the `ALLOWED_USERS` Script Property, and a short "no access" page with no data to everyone else. The existing GET routes (`?action=…`, `?email=…`) still need the shared secret and answer exactly as before (checked against recorded answers in `tests/fixtures/get-routes-golden.json`).
+- The page talks to the script only through `google.script.run.api(request)`. `api()` checks the signed-in visitor (`Session.getActiveUser()`) against `ALLOWED_USERS` on every call. A blank or unlisted email gets "You don't have access to the Music Studio. Ask Mr. O'Neal.", which the page shows in place of the dashboard. Allowed visitors get exactly what the GET routes and `doPost` return (the same code runs), made safe for `google.script.run` (dates become the same text the GET routes send). No shared secret on this path.
+- In the frontend, every request goes through `callAppsScript` in `src/api/appsScriptTransport.ts`: `google.script.run` when it exists, otherwise today's web requests with the secret. So `npm run dev` and the GitHub Pages site keep working.
+- **Safety rule (the same as Case A):** a page served by Apps Script can call *any* top-level function whose name doesn't end in `_`. So every function in `Code.gs` ends in `_` except `api`, `doGet`, `doPost`, `authorize` and `setupSheetFormatting` (these two refuse unless run from the editor) and `onFormSubmit` (refuses anything but a real trigger event). A test fails if another one appears. Keep it that way.
+
+| Script Property | What it is |
+|---|---|
+| `ALLOWED_USERS` | Pomfret emails allowed to use the Google-hosted site, separated by commas (capital letters don't matter). Empty means nobody; `authorize` logs a `PROBLEM` line. |
+
+**Deploying it (or a test copy)**
+
+1. `scripts/copy-to-apps-script.sh code`, then paste over everything in `Code.gs`. `scripts/copy-to-apps-script.sh page`, then paste over everything in the HTML file `Index` (create it the first time: **+** next to Files → **HTML** → `Index`). Press ⌘S.
+2. Set `ALLOWED_USERS` and run `authorize` (it now also logs `Runs as:` and the `ALLOWED_USERS` list).
+3. **Deploy → New deployment → Web app**, **Execute as: Me**, **Who has access: Anyone within Pomfret School**. A new deployment gets its own URL. Existing deployments keep running their own version, so the GitHub Pages site is unaffected until its deployment is archived.
+4. After later changes: paste both files again, then **Manage deployments → ✏️** on the Pomfret-only deployment → **New version**.
+
+The handoff archives the old public deployment and deletes `SHARED_SECRET`, which switches off the GitHub Pages site's data. A separate change replaces the Pages site with a "moved" page.
+
 ## App structure (prototype)
 
 - **Dashboard** — roster count, student name search (links to Students with profile open), recent updates and upcoming lessons when APIs succeed.
@@ -248,7 +274,7 @@ Mr. O'Neal is paid per private lesson and logs every lesson in a payroll time sh
 - The full Git walkthrough for beginners is the club's **[Developer Onboarding Guide](https://github.com/CivicAIClub/docs/blob/main/developer-onboarding.md)**.
 
 ## Status
-🟢 Phases 1–6 shipped: dashboard, inline student profiles, calendar event creation, class and per-student Drive resources, teacher lesson recaps, and the payroll time sheet connection. Pomfret-styled shell, deployed to GitHub Pages.
+🟢 Phases 1–6 shipped: dashboard, inline student profiles, calendar event creation, class and per-student Drive resources, teacher lesson recaps, and the payroll time sheet connection. Pomfret-styled shell, deployed to GitHub Pages, and ready to be served by Google with Pomfret sign-in ([Hosting on Google](#hosting-on-google-pomfret-sign-in-only), [handoff checklist](docs/handoff.md)).
 
 ## History
 
