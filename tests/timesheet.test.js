@@ -550,6 +550,20 @@ test("strict dropdowns: a refused write comes back as one plain-English sentence
   assert.equal(w.mark(0), "");
 });
 
+test("strict dropdowns: if the year's first row is refused, the new tab stays and the next add reuses it", () => {
+  const w = buildWorld({ lessons: [averyDouble, averyRegular], rejectInvalidScriptWrites: true });
+  const refused = w.post("add-timesheet-row", keyOf(averyDouble));
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /Nothing was added, and the lesson wasn't marked\. The new 2026-2027 tab was created and stays ready for the next try\. \(Google said: /);
+  assert.deepEqual(w.shown("2026-2027"), [YEAR_HEADERS]);
+
+  const ok = w.post("add-timesheet-row", keyOf(averyRegular));
+  assert.equal(ok.ok, true, ok.error);
+  assert.equal(ok.createdTab, false);
+  assert.equal(ok.labelRowNumber, 2);
+  assert.equal(w.ts.getSheets().filter((s) => s.getName() === "2026-2027").length, 1);
+});
+
 test("strict dropdowns: values taken from the lists (numbers as numbers) are accepted", () => {
   const w = buildWorld({ tabs: withTab2026(), lessons: [averyRegular], rejectInvalidScriptWrites: true });
   const r = w.post("add-timesheet-row", keyOf(averyRegular));

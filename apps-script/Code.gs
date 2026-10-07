@@ -3584,7 +3584,15 @@ function appendTimesheetRow(ctx, plan) {
     // try, instead of later.
     SpreadsheetApp.flush();
   } catch (err) {
-    throw new Error(timesheetWriteProblem(err, plan, sheet, firstRow, rows.length));
+    var problem = timesheetWriteProblem(err, plan, sheet, firstRow, rows.length);
+    // The new tab itself stays (with its header and dropdowns); the next try reuses it.
+    if (createdTab) {
+      problem = problem.replace(
+        " (Google said:",
+        " The new " + plan.tab + " tab was created and stays ready for the next try. (Google said:"
+      );
+    }
+    throw new Error(problem);
   }
   return {
     rowNumber: lessonRow,
