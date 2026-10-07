@@ -5,9 +5,11 @@
 // Reading (doGet) hands the website the student roster and lesson schedule from the Sheet.
 // Writing (doPost) books or cancels lessons on Google Calendar, sets up and shares Google Drive
 // folders, saves the teacher's lesson recaps, and adds each lesson he teaches to his payroll time
-// sheet (a separate Google Sheet). Every request, read or write, must carry a shared password.
-// onFormSubmit runs whenever a student fills in the sign-up Google Form. The website files that
-// talk to this script are src/api/appsScriptStudent.ts, appsScriptSchedule.ts, appsScriptPost.ts.
+// sheet (a separate Google Sheet). Requests from the GitHub Pages website must carry a shared
+// password. The script can also serve the website itself (Google hosting): doGet with nothing on
+// the address sends the page, which then asks for everything through api(), open only to the
+// Pomfret accounts on the ALLOWED_USERS list. onFormSubmit runs whenever a student fills in the
+// sign-up Google Form. On the website, every request goes through src/api/appsScriptTransport.ts.
 // The long technical note below is for developers; plain-English notes like this run throughout.
 /**
  * Case B — Music Studio: Google Apps Script backend (Code.gs)
@@ -39,7 +41,10 @@
  * ───────────────────────────────────────────────────────────────────────
  * HTTP endpoints (one Web App, routed by query params or POST body)
  * ───────────────────────────────────────────────────────────────────────
- *  Every GET must include &secret=… (same SHARED_SECRET as POSTs);
+ *  GET  (nothing on the address)     → the website itself (Google hosting):
+ *       the HTML file "Index" (title "Music Studio"), only for emails on
+ *       ALLOWED_USERS; everyone else gets a short "no access" page.
+ *  Every other GET must include &secret=… (same SHARED_SECRET as POSTs);
  *  otherwise the reply is { error: "Unauthorized" }.
  *  GET  ?email=foo@bar.com           → latest row from that student's tab
  *  GET  ?action=list                 → { students: [...] }  every roster row
@@ -159,10 +164,27 @@
  *  Future POST actions (Phases 7+) will follow the same shape:
  *    { "action": "<name>", "secret": "…", ...payload }
  *
- * The frontend clients live in:
- *   src/api/appsScriptStudent.ts        (GET, roster + single student)
- *   src/api/appsScriptSchedule.ts       (GET, lesson schedule)
- *   src/api/appsScriptPost.ts           (POST, write actions — Phase 1+)
+ *  Google hosting — api(request), called by the Google-hosted page
+ *  through google.script.run (no shared secret on this path):
+ *    api({ action: "list" | "schedule-list" })            → same as the GET
+ *    api({ action: "student" | "schedule", email })       → same as the GET
+ *    api({ action: "<any POST action>", ...payload })     → same as doPost
+ *  Every call first checks Session.getActiveUser() against the
+ *  ALLOWED_USERS Script Property (comma-separated emails, any capitals);
+ *  a blank or unlisted email gets { ok: false, accessDenied: true,
+ *  error: "You don't have access to the Music Studio. Ask Mr. O'Neal." }.
+ *  Answers are JSON-safe (a JSON round trip turns Dates into the same
+ *  text the GET routes send). SAFETY RULE: a served page can call any
+ *  function whose name doesn't end in "_", so all but doGet, doPost, api,
+ *  authorize, setupSheetFormatting and onFormSubmit end in "_" (see the
+ *  note above api for how those six check their caller).
+ *
+ * The frontend: every request goes through callAppsScript in
+ *   src/api/appsScriptTransport.ts (google.script.run when served by
+ *   Google, otherwise web GET/POST with the secret), used by
+ *   src/api/appsScriptStudent.ts        (roster + single student)
+ *   src/api/appsScriptSchedule.ts       (lesson schedule)
+ *   src/api/appsScriptPost.ts           (write actions — Phase 1+)
  *
  * ───────────────────────────────────────────────────────────────────────
  * Auth (shared secret)
@@ -203,13 +225,20 @@
  * ───────────────────────────────────────────────────────────────────────
  * Deployment (Apps Script editor → Deploy → New deployment)
  * ───────────────────────────────────────────────────────────────────────
+ *  Google hosting (Pomfret sign-in; see docs/handoff.md):
+ *    Type:           Web app
+ *    Execute as:     Me
+ *    Who has access: Anyone within Pomfret School
+ *    Files:          Code.gs, plus the HTML file "Index" (npm run build:gas;
+ *                    scripts/copy-to-apps-script.sh page)
+ *  GitHub Pages (the older public deployment, until the handoff):
  *    Type:           Web app
  *    Execute as:     Me
  *    Who has access: Anyone
- *  Copy the resulting `/exec` URL into APPS_SCRIPT_BASE_URL inside
- *  src/api/appsScriptStudent.ts. After ANY change to Code.gs, redeploy
- *  via Deploy → Manage deployments → ✏️ → "New version" so the live
- *  /exec URL serves the new code.
+ *  Its `/exec` URL goes in VITE_APPS_SCRIPT_BASE_URL (.env.local and the
+ *  repo's Actions secrets). After ANY change to Code.gs, redeploy via
+ *  Deploy → Manage deployments → ✏️ → "New version" so that deployment
+ *  serves the new code; each deployment keeps its own version until then.
  */
 
 // ──────────────────────────────────────────────────────────────────────
