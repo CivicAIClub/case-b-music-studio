@@ -14,3 +14,18 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+/**
+ * Google hosting: when Apps Script serves the page (HtmlService), Google adds
+ * `google.script.run` to it. The page only ever calls `api(request)` in Code.gs
+ * (see src/api/appsScriptTransport.ts); everywhere else this is undefined.
+ */
+interface GoogleScriptRun {
+  withSuccessHandler(handler: (value: unknown) => void): GoogleScriptRun;
+  withFailureHandler(handler: (error: unknown) => void): GoogleScriptRun;
+  api(request: Record<string, unknown>): void;
+}
+
+interface Window {
+  google?: { script?: { run?: GoogleScriptRun } };
+}

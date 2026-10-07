@@ -1,5 +1,9 @@
+// AppLayout.tsx: the frame around every page: the school header, the navigation buttons, and
+// the page itself underneath. On the Pomfret-only Google link, if the Apps Script says this
+// visitor isn't on its list of allowed people, the frame shows that message instead of the page.
 import { NavLink, Outlet } from "react-router-dom";
 import { SchoolBrandMark } from "./SchoolBrandMark";
+import { useAccessDeniedMessage } from "../lib/accessDenied";
 import {
   EXTERNAL_LINKS,
   EXTERNAL_LINK_ORDER,
@@ -11,6 +15,8 @@ function navPillClassName({ isActive }: { isActive: boolean }) {
 }
 
 export function AppLayout() {
+  // Set once the script answers "you don't have access" (see src/lib/accessDenied.ts).
+  const accessDenied = useAccessDeniedMessage();
   return (
     <div className="app-shell">
       <a href="#main-content" className="skip-link">
@@ -65,7 +71,20 @@ export function AppLayout() {
       </header>
       <main id="main-content" className="main" tabIndex={-1}>
         <div className="main__body">
-          <Outlet />
+          {accessDenied ? (
+            <section className="card access-denied" role="alert" aria-labelledby="access-denied-h">
+              <h1 id="access-denied-h" className="access-denied__title">
+                No access
+              </h1>
+              <p className="access-denied__message">{accessDenied}</p>
+              <p className="muted">
+                Signed in to more than one Google account? Open the Music Studio in a browser
+                window signed in only to your Pomfret account.
+              </p>
+            </section>
+          ) : (
+            <Outlet />
+          )}
         </div>
       </main>
     </div>

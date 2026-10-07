@@ -20,7 +20,9 @@
  * The deployed `/exec` URL lives in `VITE_APPS_SCRIPT_BASE_URL` in
  * `.env.local`. The frontend appends `?action=...` or `?email=...`, plus
  * `&secret=...` (the same shared secret POSTs carry; doGet rejects reads
- * without it).
+ * without it). When the page is served by Apps Script itself (Google
+ * hosting), the same reads go through `google.script.run.api()` instead,
+ * with no URL or secret: see appsScriptTransport.ts, which every request uses.
  */
 // In plain English: this file fetches student information for the website. Students fill
 // out a Google Form, and their answers land in the studio's Google Sheet. The Apps Script
@@ -29,9 +31,9 @@
 // This file does two jobs: get the whole roster (every student), and get one student's newest
 // answers. Each row is tidied into a student profile by mapSheetStudentResponse.ts, and the
 // Students page and the Dashboard show the results.
-// It also keeps the script's web address, which the other files in src/api borrow.
-// Reading data needs the same shared secret (password) that changes carry (see
-// appsScriptPost.ts), so the roster's emails aren't open to anyone who finds the script's address.
+// Every request goes through callAppsScript (appsScriptTransport.ts), which either asks Google
+// directly (on the Pomfret-only Google link) or sends a web request carrying the shared secret
+// (password), so the roster's emails aren't open to anyone who finds the script's address.
 // Helpers from other files: one turns a raw sheet row into a tidy profile, and one picks a
 // student's most recent answers when they filled out the form more than once.
 import {
@@ -39,33 +41,7 @@ import {
   type SheetStudentProfile,
 } from "./mapSheetStudentResponse";
 import { pickLatestProfileFromSubmissions } from "../lib/formSubmissionHistory";
-
-// Read the script's web address from the settings file (.env.local), which is copied into
-// the website when it is built. If it is missing, stop right away with instructions,
-// because nothing on the site can work without it.
-const RAW_BASE_URL = (import.meta.env.VITE_APPS_SCRIPT_BASE_URL ?? "").trim();
-if (!RAW_BASE_URL) {
-  throw new Error(
-    "VITE_APPS_SCRIPT_BASE_URL is not set. Copy .env.example to .env.local " +
-      "and paste your Apps Script /exec URL."
-  );
-}
-// Share the address so the other data files (schedule, calendar, recaps) use the same one.
-export const APPS_SCRIPT_BASE_URL = RAW_BASE_URL;
-
-// Look up the shared secret (the password that proves a request came from this website).
-// It comes from a settings file (.env.local) and is copied into the website when it is built.
-// If it is missing or blank, stop right away with a message explaining how to fix it.
-// Both the reading files (this one and appsScriptSchedule.ts) and appsScriptPost.ts use it.
-export function readSharedSecret(): string {
-  const value = import.meta.env.VITE_APPS_SCRIPT_SHARED_SECRET;
-  if (typeof value !== "string" || !value.trim()) {
-    throw new Error(
-      "Missing VITE_APPS_SCRIPT_SHARED_SECRET. Add it to .env.local at the repo root (copy .env.example) and restart the dev server."
-    );
-  }
-  return value;
-}
+import { callAppsScript } from "./appsScriptTransport";
 
 // A small safety check: is this value a "record" (a bundle of labeled values, like one
 // spreadsheet row with column names) rather than a list or nothing at all?
@@ -139,25 +115,15 @@ export type AllStudentsRosterResult = {
 export async function getAllStudents(
   init?: RequestInit
 ): Promise<AllStudentsRosterResult> {
-  // Build the web address that asks the script: "send me the whole student list."
-  // The shared secret rides along at the end so the script knows the request is from us.
-  const url = `${APPS_SCRIPT_BASE_URL}?action=list&secret=${encodeURIComponent(readSharedSecret())}`;
+  // Ask the script: "send me the whole student list."
+  const reply = await callAppsScript("list", {}, { signal: init?.signal ?? undefined });
 
-  // Ask the script, and wait for its reply.
-  const res = await fetch(url, {
-    method: "GET",
-    ...init,
-  });
-
-  // Read the reply as JSON (a plain-text format for structured information). If it can't be
-  // read, the web address is probably wrong or the script sent back an error page.
-  const text = await res.text();
-  let json: unknown;
-  try {
-    json = JSON.parse(text) as unknown;
-  } catch {
+  // The reply should be JSON (a plain-text format for structured information). If it isn't,
+  // the web address is probably wrong or the script sent back an error page.
+  const json = reply.json;
+  if (json === undefined) {
     throw new Error(
-      `Could not read roster (HTTP ${res.status}). Is the web app URL correct?`
+      `Could not read roster (HTTP ${reply.status}). Is the web app URL correct?`
     );
   }
 
@@ -167,11 +133,11 @@ export async function getAllStudents(
   }
 
   // A failing status number (anything not in the 200s) also counts as an error.
-  if (!res.ok) {
+  if (reply.status < 200 || reply.status >= 300) {
     throw new Error(
       typeof json === "object" && json !== null && "error" in json
         ? String((json as { error: unknown }).error)
-        : `Roster request failed (HTTP ${res.status}).`
+        : `Roster request failed (HTTP ${reply.status}).`
     );
   }
 
@@ -219,23 +185,12 @@ export async function getStudentByEmail(
     throw new Error("Email is required to load a student from the sheet.");
   }
 
-  // Build the web address that asks for this one student, with the email safely encoded.
-  // The shared secret rides along at the end so the script knows the request is from us.
-  const url = `${APPS_SCRIPT_BASE_URL}?email=${encodeURIComponent(trimmed)}&secret=${encodeURIComponent(readSharedSecret())}`;
-
-  // Ask the script, then read its reply as JSON; complain clearly if it can't be read.
-  const res = await fetch(url, {
-    method: "GET",
-    ...init,
-  });
-
-  const text = await res.text();
-  let json: unknown;
-  try {
-    json = JSON.parse(text) as unknown;
-  } catch {
+  // Ask the script for this one student, then check its reply is JSON.
+  const reply = await callAppsScript("student", { email: trimmed }, { signal: init?.signal ?? undefined });
+  const json = reply.json;
+  if (json === undefined) {
     throw new Error(
-      `Could not read response (HTTP ${res.status}). Is the web app URL correct?`
+      `Could not read response (HTTP ${reply.status}). Is the web app URL correct?`
     );
   }
 
@@ -244,11 +199,11 @@ export async function getStudentByEmail(
     throw new Error(json.error);
   }
 
-  if (!res.ok) {
+  if (reply.status < 200 || reply.status >= 300) {
     throw new Error(
       typeof json === "object" && json !== null && "error" in json
         ? String((json as { error: unknown }).error)
-        : `Request failed (HTTP ${res.status}).`
+        : `Request failed (HTTP ${reply.status}).`
     );
   }
 

@@ -9,7 +9,10 @@
  * the Apps Script side and in `.env.local` on this side
  * (`VITE_APPS_SCRIPT_SHARED_SECRET`). The secret is intentionally not
  * committed to git. GET reads send the same secret as a `secret` query
- * parameter (see appsScriptStudent.ts, which also holds `readSharedSecret`).
+ * parameter. Both are built in appsScriptTransport.ts, which also holds
+ * `readSharedSecret`. On the Google-hosted page there is no secret: the
+ * same actions go through google.script.run.api(), which checks the
+ * signed-in teacher against ALLOWED_USERS.
  *
  * IMPORTANT: this secret is bundled into the deployed JS — anyone
  * who can open the site in DevTools can read it. Treat the deployed
@@ -46,9 +49,10 @@
 // site's web address is kept semi-private rather than shared publicly.
 // Files that send their notes through this one: appsScriptCalendar.ts, appsScriptRecaps.ts,
 // appsScriptResources.ts, and appsScriptStudentResources.ts.
-// Borrow the script's web address, and the helper that looks up the shared secret, from the
-// file that reads student data (the reading files send the same secret too).
-import { APPS_SCRIPT_BASE_URL, readSharedSecret } from "./appsScriptStudent";
+// Every note goes through callAppsScript (appsScriptTransport.ts): on the Pomfret-only Google
+// link it is handed to the script directly (no password needed: Google has signed the teacher
+// in); anywhere else it is sent over the web with the shared secret, exactly as before.
+import { callAppsScript, type AppsScriptReply } from "./appsScriptTransport";
 
 // A small safety check: is this value a "record" (a bundle of labeled values, like one
 // spreadsheet row with column names) rather than a list or nothing at all?
@@ -64,7 +68,7 @@ export type AppsScriptPostInit = {
   /**
    * Override the shared secret read from `.env.local`. Useful in tests
    * and one-off browser-console smoke checks. Production code should
-   * always rely on the env var.
+   * always rely on the env var. Ignored on the Google-hosted page.
    */
   secret?: string;
 };
@@ -73,17 +77,18 @@ export type AppsScriptPostInit = {
 //   - an "action": a short name for the job the script should do, like "create-event",
 //   - a "payload": any extra details that job needs, like which student and which lesson,
 //   - the optional extras described just above.
-// It packs everything into one message, sends it, and gives back the script's reply.
+// It sends everything through callAppsScript and gives back the script's reply.
 // If anything goes wrong, it stops with an error message the page can show the teacher.
 /**
- * Sends a POST to the Apps Script web app and returns the success
+ * Sends a write action to the Apps Script and returns the success
  * payload (without the `ok: true` wrapper).
  *
- * @param action  Routed by the `switch` in `doPost` inside Code.gs.
- * @param payload Extra fields merged into the request body alongside
- *                `action` and `secret`. Must be JSON-serialisable.
- *                Reserved keys (`action`, `secret`) on `payload` are
- *                ignored — the explicit args win.
+ * @param action  Routed by the `switch` in `runPostAction_` inside Code.gs
+ *                (used by both doPost and api).
+ * @param payload Extra fields sent alongside `action` (and, on the web,
+ *                `secret`). Must be JSON-serialisable. Reserved keys
+ *                (`action`, `secret`) on `payload` are ignored: the
+ *                explicit args win.
  */
 export async function postToAppsScript<TResult extends Record<string, unknown>>(
   action: string,
@@ -96,9 +101,6 @@ export async function postToAppsScript<TResult extends Record<string, unknown>>(
     throw new Error("postToAppsScript requires a non-empty action.");
   }
 
-  // Use the test password if one was given; otherwise use the normal shared secret.
-  const secret = init?.secret ?? readSharedSecret();
-
   // If the extra details happen to include their own "action" or "secret", throw those away
   // so they can't overwrite the real ones. The two "void" lines just tell the code checker
   // that ignoring them is on purpose.
@@ -106,122 +108,21 @@ export async function postToAppsScript<TResult extends Record<string, unknown>>(
   void _ignoredAction;
   void _ignoredSecret;
 
-  // Pack the job name, the password, and the details into JSON (a plain-text format that
-  // programs use to send structured information to each other).
-  const body = JSON.stringify({
-    action: trimmedAction,
-    secret,
-    ...rest,
-  });
-
-  // Send it (trying a second time if Google has a brief hiccup), then read the reply.
-  const result = await fetchWithRetry(body, init?.signal);
-  return processResponse<TResult>(result.text, result.status);
+  // Send it (on the web, trying a second time if Google has a brief hiccup), then check the reply.
+  const reply = await callAppsScript(trimmedAction, rest, init);
+  return processResponse<TResult>(reply);
 }
 
-// Actually send the message over the internet to the script's web address.
-// If Google has a brief hiccup, wait a moment and try one more time before giving up.
-// It gives back the raw text of the reply plus its status number (200 means "OK").
-/**
- * fetch wrapper that retries once on a transient failure. Apps Script
- * occasionally returns 502/503/504 from a Google-side blip; a single
- * retry covers the vast majority of those without making the user wait
- * on a manual "Try again". The retry is skipped when the call is
- * aborted (the user explicitly cancelled).
- */
-async function fetchWithRetry(
-  body: string,
-  signal: AbortSignal | undefined
-): Promise<{ text: string; status: number }> {
-  // Remember the last problem we hit, so we can report it if both tries fail.
-  let lastError: unknown = null;
-  // Try at most twice: attempt 0 is the first try, attempt 1 is the retry.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    // If the teacher already cancelled (for example, closed the window), stop here.
-    if (signal?.aborted) {
-      throw new DOMException("Aborted", "AbortError");
-    }
-    // Send the message. It is labeled "plain text" on purpose: with any other label the browser
-    // first asks Google's script for permission, and the script can't answer that question
-    // (the note at the top of this file explains more). "redirect: follow" is needed because
-    // Google hands the reply back from a second web address.
-    let res: Response;
-    try {
-      res = await fetch(APPS_SCRIPT_BASE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body,
-        signal,
-        redirect: "follow",
-      });
-    } catch (err) {
-      // The message never arrived (no internet, a wrong address, and so on).
-      // If the teacher cancelled on purpose, pass that along without retrying.
-      if (err instanceof DOMException && err.name === "AbortError") throw err;
-      lastError = err;
-      // After the first failure, wait 0.4 seconds and try again.
-      if (attempt === 0) {
-        await wait(400, signal);
-        continue;
-      }
-      // The second try failed too, so give up with a helpful message.
-      throw new Error(
-        `Could not reach Apps Script at ${APPS_SCRIPT_BASE_URL}. Network error or web app URL is wrong.`
-      );
-    }
-
-    // Status numbers 502, 503, and 504 mean Google's servers had a temporary problem.
-    // On the first try, wait a moment and send again instead of bothering the teacher.
-    if (
-      attempt === 0 &&
-      (res.status === 502 || res.status === 503 || res.status === 504)
-    ) {
-      await wait(400, signal);
-      continue;
-    }
-
-    // Otherwise we got a real reply (good or bad), so read its text and hand it back.
-    const text = await res.text();
-    return { text, status: res.status };
-  }
-  // Only reached in unusual cases; report the last problem we saw.
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Apps Script request failed.");
-}
-
-// Pause for the given number of milliseconds (thousandths of a second) before going on.
-// If the note gets cancelled during the pause, stop waiting right away.
-async function wait(ms: number, signal: AbortSignal | undefined): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const id = window.setTimeout(resolve, ms);
-    // If a cancel arrives during the pause, stop the timer and report the cancellation.
-    if (signal) {
-      signal.addEventListener(
-        "abort",
-        () => {
-          window.clearTimeout(id);
-          reject(new DOMException("Aborted", "AbortError"));
-        },
-        { once: true }
-      );
-    }
-  });
-}
-
-// Make sense of the script's reply. It is given the reply text and the status number.
-// Every reply should be JSON saying "ok: true" (success) or "ok: false" plus an error message.
-// On success it gives back the reply's contents; on failure it stops with a readable error.
+// Make sense of the script's reply. Every reply should be JSON saying "ok: true" (success) or
+// "ok: false" plus an error message. On success it gives back the reply's contents; on failure
+// it stops with a readable error.
 function processResponse<TResult extends Record<string, unknown>>(
-  text: string,
-  status: number
+  reply: AppsScriptReply
 ): TResult {
-  // Try to read the reply as JSON. If it isn't JSON, Google probably sent back an error page,
-  // which often happens when Code.gs was changed but not redeployed (republished).
-  let json: unknown;
-  try {
-    json = JSON.parse(text) as unknown;
-  } catch {
+  const { status, json } = reply;
+  // If the reply isn't JSON, Google probably sent back an error page, which often happens when
+  // Code.gs was changed but not redeployed (republished).
+  if (json === undefined) {
     throw new Error(
       `Apps Script returned a non-JSON response (HTTP ${status}). Did you redeploy after changing Code.gs?`
     );
