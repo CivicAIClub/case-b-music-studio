@@ -22,7 +22,7 @@ Build a **Music Student Profile** experience (roster, inline profiles, schedules
 | Developer | JT Gannon |
 | Club lead | Cayden Auyang |
 
-**Live site:** https://civicaiclub.github.io/case-b-music-studio/ (treat the URL as semi-private; see Auth below).
+**Live site:** served by Google with Pomfret sign-in (Mr. O'Neal has the link). The old GitHub Pages address, https://civicaiclub.github.io/case-b-music-studio/, now only shows a "moved" page.
 
 **History:** the early UI work (April 2026: UI shell, live Sheets data, Pomfret styling, form-submission history) was written by Serena on the monorepo branch `case-b/continued-work`; those original commits are preserved under her name on the `archive/serena-continued-work` branch of this repo. Later phases were merged through PRs #8–#24 in the old monorepo.
 
@@ -261,7 +261,7 @@ The handoff archives the old public deployment and deletes `SHARED_SECRET`, whic
 
 ## Deploying to GitHub Pages
 
-`.github/workflows/deploy-pages.yml` runs on every push to `main`: `npm ci`, `npm run build` with `VITE_APPS_SCRIPT_BASE_URL` and `VITE_APPS_SCRIPT_SHARED_SECRET` injected from this repo's **Actions secrets**, then publishes `dist/` to the `gh-pages` branch. Site: https://civicaiclub.github.io/case-b-music-studio/. `vite.config.ts` sets `base` to `/case-b-music-studio/`; if the repo is ever renamed, update that too. `.github/workflows/ci.yml` type-checks and builds every pull request with placeholder values.
+Since the handoff, the app is served by Google with Pomfret sign-in, so GitHub Pages only shows a "moved" page. `.github/workflows/deploy-pages.yml` runs on every push to `main` and publishes `pages-moved/index.html` (also as `404.html`, so old links land on it) to the `gh-pages` branch. It no longer builds the app or uses the `VITE_APPS_SCRIPT_*` Actions secrets, which can be deleted. Site: https://civicaiclub.github.io/case-b-music-studio/. `npm run build` still builds the app for local checks (`vite.config.ts` keeps `base` at `/case-b-music-studio/`), and `.github/workflows/ci.yml` still type-checks and builds every pull request with placeholder values.
 
 ## Working on this repo
 
