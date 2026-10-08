@@ -32,6 +32,10 @@
  *      plus two columns the script adds and fills in itself (grayed out,
  *      warning-protected): "Calendar Event ID" (Phase 2) and
  *      "Time Sheet" (Phase 6: "Added 10/7/2026" or "Skipped").
+ *      setupSheetFormatting gives Student Email and Student Name dropdowns
+ *      from the roster and Lesson Block one from the time sheet's Block
+ *      list (all warning-only; columns found by title); onFormSubmit
+ *      refreshes the first two after each sign-up.
  *  - One tab per student, named after their email — created automatically
  *    by `onFormSubmit` below. Old responses submitted *before* this
  *    trigger was installed will not have a per-email tab; run a one-time
@@ -121,20 +125,41 @@
  *           → { ok, recaps: [...] }
  *
  *    Phase 6 — Time sheet. Mr. O'Neal's payroll time sheet is a separate
- *    Google Sheet: one tab per school year named exactly "2026-2027"
- *    (newest first), "(CHAPEL/MISC.)" companion tabs, and lookup tabs
- *    (Lesson No., Block, hours, Instrument) that feed its dropdowns. Two
- *    Script Properties connect it (never put either value in the repo):
+ *    Google Sheet (since the handoff, his own copy of it): one tab per
+ *    school year named exactly "2026-2027" (newest first), "(CHAPEL/MISC.)"
+ *    companion tabs, and lookup tabs (Lesson No., Block, hours,
+ *    Instrument) that feed its dropdowns. On 2026-2027, columns H, I and J
+ *    are COMPLETED LESSON (a checkbox he ticks), Dir. of Music Sign. and
+ *    Paid on paydate; older tabs have only the last two. Two Script
+ *    Properties connect it (never put either value in the repo):
  *      TIMESHEET_SPREADSHEET_ID = the time sheet's ID, or its whole URL
  *      TIMESHEET_START_DATE     = first lesson date to offer, like
  *                                 2026-10-07 (earlier lessons were typed
  *                                 in by hand and are never offered)
  *    Share the time sheet as Editor with the Google account the web app
- *    runs as. The row actions use the Phase 2 composite key. The script
- *    appends rows (columns A-G only, never H or I, never editing or
- *    deleting a row), matches year tabs by exact name (never the CHAPEL
- *    tabs), only reads the lookup tabs, and notes each lesson in the
- *    Lesson Schedule's "Time Sheet" column.
+ *    runs as. The row actions use the Phase 2 composite key. The rules:
+ *      - A new row lands right below the last row with anything in
+ *        columns A-G. Other columns don't count, so pre-made rows that
+ *        hold only an unticked checkbox fill up in order; if the tab ends
+ *        there, a row is added. The row gets the format and dropdowns of
+ *        the lesson row above it, across the whole table. Only A-G are
+ *        written, in one write: never H, I or J, never a ticked box, and
+ *        no row is ever edited or deleted.
+ *      - Over 45 minutes counts as a double: 1.5 hours, Lesson No.
+ *        "Double". 45 minutes or less, or no end time, is 0.75.
+ *      - A term label row (like "Winter 2026-27") is added only on a tab
+ *        that already has one (text in A naming Fall, Winter or Spring).
+ *      - After each add, the first name, last name and music subject
+ *        written are remembered per student (Script Property
+ *        TIMESHEET_STUDENT:<lowercase email>, JSON) and start that
+ *        student's next row; values changed in the preview still win.
+ *      - Year tabs are matched by exact name (never the CHAPEL tabs); the
+ *        lookup tabs are only read. A new school-year tab copies the
+ *        newest one's title row, panes, widths and every column's
+ *        dropdowns, but no lesson rows.
+ *      - The Lesson Schedule's "Time Sheet" column notes each lesson:
+ *        "Added 10/7/2026", "Added 10/7/2026 (70 min, logged as 1.5)"
+ *        when it wasn't 45 or 90 minutes long, or "Skipped".
  *      {"action":"timesheet-status", "secret":"…"}
  *           → { ok, configured, reason?, sheetUrl, sheetTitle, targetTab,
  *                targetTabExists, startDate, codeVersion,
@@ -145,8 +170,10 @@
  *       lessonDate, startTime, overrides? }
  *           → { ok, tab, createsTab, insertBefore, termLabel,
  *                addsTermLabel, row: [A..G as shown], fields, duplicate,
- *                warnings: [plain English], lists, mark, lesson,
- *                sheetUrl, sheetTitle }        // writes nothing
+ *                warnings: [plain English], info: [plain English],
+ *                lengthLine: "70-minute lesson, logged as 1.5 hours
+ *                (a double)." (null without an end time), lists, mark,
+ *                lesson, sheetUrl, sheetTitle }        // writes nothing
  *      {"action":"add-timesheet-row", "secret":"…", studentEmail,
  *       lessonDate, startTime, overrides?: { lessonNo, firstName,
  *       lastName, block, hours, subject } }
@@ -158,6 +185,14 @@
  *      {"action":"skip-timesheet-row", "secret":"…", studentEmail,
  *       lessonDate, startTime}
  *           → { ok, skipped: true, mark: "Skipped" }  // time sheet untouched
+ *
+ *    Header links (the website's Lesson Schedule and Time sheet links).
+ *      {"action":"studio-links", "secret":"…"}
+ *           → { ok, lessonScheduleUrl, timesheetUrl }
+ *             lessonScheduleUrl opens the studio Sheet on its Lesson
+ *             Schedule tab (the Sheet's address + "#gid=" + the tab's ID);
+ *             timesheetUrl opens the time sheet the tool writes to, or is
+ *             null when TIMESHEET_SPREADSHEET_ID isn't set.
  *    "ping" also returns codeVersion (CODE_VERSION, near the top of the
  *    Config section), and authorize() logs it on its first line.
  *
@@ -196,6 +231,8 @@
  *  parameter (?action=list&secret=…), because GETs return the roster
  *  (with student emails) and the schedule.
  *  The frontend reads it from .env.local (VITE_APPS_SCRIPT_SHARED_SECRET).
+ *  Since the handoff, SHARED_SECRET is no longer set in production, so
+ *  every request on this path is refused (see Deployment below).
  *
  *  IMPORTANT: this secret IS bundled into the JS the browser
  *  downloads — anyone who can open the deployed site in DevTools can
@@ -223,22 +260,24 @@
  *    - Event type:      On form submit
  *
  * ───────────────────────────────────────────────────────────────────────
- * Deployment (Apps Script editor → Deploy → New deployment)
+ * Deployment (see docs/handoff.md)
  * ───────────────────────────────────────────────────────────────────────
- *  Google hosting (Pomfret sign-in; see docs/handoff.md):
+ *  The live site is Mr. O'Neal's Pomfret-only deployment. Never archive it.
  *    Type:           Web app
- *    Execute as:     Me
+ *    Execute as:     Me (Mr. O'Neal: he deployed it, so it runs as him)
  *    Who has access: Anyone within Pomfret School
  *    Files:          Code.gs, plus the HTML file "Index" (npm run build:gas;
  *                    scripts/copy-to-apps-script.sh page)
- *  GitHub Pages (the older public deployment, until the handoff):
- *    Type:           Web app
- *    Execute as:     Me
- *    Who has access: Anyone
- *  Its `/exec` URL goes in VITE_APPS_SCRIPT_BASE_URL (.env.local and the
- *  repo's Actions secrets). After ANY change to Code.gs, redeploy via
- *  Deploy → Manage deployments → ✏️ → "New version" so that deployment
- *  serves the new code; each deployment keeps its own version until then.
+ *  To update: paste Code.gs and Index into the editor and save; then HE
+ *  clicks Deploy → Manage deployments → ✏️ → Version: New version →
+ *  Deploy. Only he deploys: a deploy by anyone else would make the site
+ *  run as them. The form trigger runs the saved code straight away; the
+ *  site keeps its version until that click.
+ *  The older public deployment (GitHub Pages, "Who has access: Anyone")
+ *  was archived after the handoff and SHARED_SECRET was deleted, so the
+ *  secret-checked routes (GETs with &secret=…, doPost) refuse every
+ *  request. Their code stays in case a public deployment is ever needed
+ *  again. For live checks, use the editor's test deployment (/dev).
  */
 
 // ──────────────────────────────────────────────────────────────────────
@@ -248,7 +287,7 @@
 // Which version of this file is pasted into the Apps Script editor. Change it whenever Code.gs
 // changes. authorize() logs it on its first line and "ping" sends it back, so after a paste you
 // can confirm the live web app is running this exact version.
-var CODE_VERSION = "2026-10-07 google hosting";
+var CODE_VERSION = "2026-10-07 post-delivery";
 
 /** Property key under which the GET/POST shared secret is stored. */
 // SETTINGS. This section holds fixed settings the rest of the file relies on: tab names, who is
@@ -432,7 +471,8 @@ var TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY = "TIMESHEET_SPREADSHEET_ID";
 var TIMESHEET_START_DATE_PROPERTY_KEY = "TIMESHEET_START_DATE";
 
 // The title of the extra Lesson Schedule column where the script notes what happened to each
-// lesson: "Added 10/7/2026" once it is on the time sheet, or "Skipped". Auto-created on first use.
+// lesson: "Added 10/7/2026" once it is on the time sheet ("Added 10/7/2026 (70 min, logged as
+// 1.5)" when it wasn't 45 or 90 minutes long), or "Skipped". Auto-created on first use.
 var TIME_SHEET_COLUMN = "Time Sheet";
 
 // The time sheet's lookup tabs. Each tab's column A holds the choices for one dropdown on the
@@ -449,14 +489,32 @@ var TIMESHEET_LIST_TABS = {
 var TIMESHEET_FIRST_NAME_TAB = "First Name";
 var TIMESHEET_LAST_NAME_TAB = "Last Name";
 
-// The script writes columns A to G of a year tab and nothing else. Column H (Dir. of Music Sign.)
-// and column I (Paid on paydate) are filled in by the music director and the business office.
+// The script writes columns A to G of a year tab and nothing else. Column H (COMPLETED LESSON, a
+// checkbox Mr. O'Neal ticks himself), column I (Dir. of Music Sign.) and column J (Paid on
+// paydate) belong to him, the music director and the business office.
 var TIMESHEET_WRITE_COLUMNS = 7;
 
-// Total Hours for a regular lesson, and for a double lesson (one that lasts 90 minutes).
+// Total Hours for a regular lesson and for a double lesson. A lesson longer than 45 minutes counts
+// as a double; 45 minutes or less is a regular lesson. 45 and 90 minutes are the usual lengths.
 var TIMESHEET_REGULAR_HOURS = 0.75;
 var TIMESHEET_DOUBLE_HOURS = 1.5;
+var TIMESHEET_REGULAR_MINUTES = 45;
 var TIMESHEET_DOUBLE_MINUTES = 90;
+
+// After each lesson is added, the first name, last name and music subject written on the time
+// sheet are remembered per student, under this drawer-slot label plus their lowercase email.
+// The next lesson for that student starts from them (some students are written differently on
+// the time sheet than on the sign-up form).
+var TIMESHEET_STUDENT_PROPERTY_PREFIX = "TIMESHEET_STUDENT:";
+
+// The Lesson Schedule's Lesson Block dropdown copies the time sheet's Block list. If the time
+// sheet can't be opened, this built-in copy of it is used instead (two spaces in "1PM  Shadow
+// Block", exactly as on the time sheet).
+var LESSON_BLOCK_FALLBACK_LIST = [
+  "Zoom Meeting", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "1PM  Shadow Block",
+  "2PM Shadow Block", "Lunch", "After School", "Before School", "Meeting Block",
+  "Faculty/Dept. Meeting", "Sunday"
+];
 
 // The question on the sign-up form that says which instrument a student plays.
 var FORM_INSTRUMENT_QUESTION = "What instrument do you want to play?";
@@ -795,6 +853,8 @@ function runPostAction_(action, payload) {
       return handleAddTimesheetRow_(payload);
     case "skip-timesheet-row":
       return handleSkipTimesheetRow_(payload);
+    case "studio-links":
+      return handleStudioLinks_(payload);
     default:
       return { ok: false, error: "Unknown action: " + action };
   }
@@ -1300,9 +1360,11 @@ function authorize() {
     Logger.log(line);
   });
 
+  // Only Mr. O'Neal deploys (the site runs as whoever deploys it), so this never tells the
+  // person running it to deploy.
   Logger.log(
-    "Authorization complete. Re-deploy (Manage deployments → ✏️ → New version) " +
-    "if you haven't already."
+    "Authorization complete. The site runs this code once Mr. O'Neal clicks Deploy → Manage " +
+    "deployments → ✏️ → New version → Deploy."
   );
   return {
     ok: true,
@@ -1587,17 +1649,14 @@ function buildEventPreview_(row) {
     : displayName + " - Music Lesson";
 
   // Description: the student, block, focus, and notes, each on its own line, followed by a
-  // reminder that the event was made by the dashboard.
+  // short last line saying where the invite came from (the student sees it too).
   var descriptionParts = [];
   descriptionParts.push("Student: " + displayName + " <" + studentEmail + ">");
   if (lessonBlock) descriptionParts.push("Block: " + lessonBlock);
   if (lessonFocus) descriptionParts.push("Focus: " + lessonFocus);
   if (note) descriptionParts.push("Notes: " + note);
   descriptionParts.push("");
-  descriptionParts.push(
-    "Auto-created by the Music Studio dashboard. Edit the lesson row in " +
-    'the "Lesson Schedule" tab and re-run if you need to change times.'
-  );
+  descriptionParts.push("Scheduled with the Music Studio.");
   var description = descriptionParts.join("\n");
 
   // Dedupe attendees case-insensitively, normalizing the stored value to
@@ -2802,9 +2861,11 @@ function compareRecapsNewestFirst_(a, b) {
 // sheet (a separate Google Sheet that the music director signs off and the business office pays
 // from). These functions add each lesson he teaches to that time sheet, so he never types it
 // twice. The rules they always follow:
-//   - Append only. A new row goes directly below the last used row of the school-year tab.
-//     Existing time sheet rows are never edited or deleted.
-//   - Only columns A to G are written. H (signature) and I (pay date) are never touched.
+//   - A new row goes right below the last row with anything in columns A to G (other columns
+//     don't count, so pre-made rows holding only an unticked checkbox fill up in order).
+//     Existing lesson rows are never edited or deleted.
+//   - Only columns A to G are written. H, I and J (COMPLETED LESSON, the signature, the pay
+//     date) are never touched, so the checkbox is never ticked.
 //   - The CHAPEL/MISC. tabs are never touched, and the lookup tabs are only read.
 //   - A lesson is offered only if it is dated on or after TIMESHEET_START_DATE.
 // After a lesson is added (or skipped), the Lesson Schedule's "Time Sheet" column says so.
@@ -2880,6 +2941,8 @@ function handlePreviewTimesheetRow_(payload) {
     fields: plan.fields,
     duplicate: plan.duplicate,
     warnings: plan.warnings,
+    info: plan.info,
+    lengthLine: plan.lengthLine,
     lists: plan.lists,
     mark: plan.mark,
     lesson: plan.lesson,
@@ -2908,7 +2971,9 @@ function handleAddTimesheetRow_(payload) {
 // addTimesheetRowLocked_ does the adding, only while the lock is held, in this order:
 //   1. check (again, with a fresh read) whether the lesson is already on the tab,
 //   2. append the row,
-//   3. write "Added <date>" in the lesson's Time Sheet cell on the Lesson Schedule.
+//   3. remember how the student was written (first name, last name, music subject) for their
+//      next row,
+//   4. write "Added <date>" in the lesson's Time Sheet cell on the Lesson Schedule.
 // If the lesson is already on the tab, nothing is appended; only the note is written. That makes
 // a retry safe after a call that added the row but failed before writing the note.
 function addTimesheetRowLocked_(payload) {
@@ -2923,7 +2988,9 @@ function addTimesheetRowLocked_(payload) {
 
   // Step 1: already on the tab? Then don't add a second row; just write the note.
   if (plan.duplicate) {
-    var existingMark = isAddedMark_(ctx.mark) ? ctx.mark : addedMarkText_(ctx.studioTz);
+    var existingMark = isAddedMark_(ctx.mark)
+      ? ctx.mark
+      : addedMarkText_(ctx.studioTz, plan.lesson.minutes, plan.loggedHours);
     if (!isAddedMark_(ctx.mark)) {
       writeTimesheetMark_(ctx.found, existingMark, plan.tab, plan.duplicate.rowNumber);
     }
@@ -2952,8 +3019,12 @@ function addTimesheetRowLocked_(payload) {
   // Step 2: append the row (with a term label row above it when this starts a new term).
   var appended = appendTimesheetRow_(ctx, plan);
 
-  // Step 3: note it on the Lesson Schedule, so it leaves the dashboard's list.
-  var mark = addedMarkText_(ctx.studioTz);
+  // Step 3: remember the names and subject just written, so this student's next row starts from
+  // the same spelling. This can never fail the add.
+  rememberTimesheetStudent_(plan.lesson.studentEmail, plan.fields);
+
+  // Step 4: note it on the Lesson Schedule, so it leaves the dashboard's list.
+  var mark = addedMarkText_(ctx.studioTz, plan.lesson.minutes, plan.loggedHours);
   writeTimesheetMark_(ctx.found, mark, plan.tab, appended.rowNumber);
   return {
     ok: true,
@@ -2990,6 +3061,25 @@ function handleSkipTimesheetRow_(payload) {
   } finally {
     lock.releaseLock();
   }
+}
+
+// handleStudioLinks_ gives the website the two spreadsheet links in its header: the studio Sheet
+// opened on its Lesson Schedule tab (the Sheet's address + "#gid=" + the tab's ID), and the time
+// sheet the tool writes to (Mr. O'Neal's copy). The time sheet link is built from
+// TIMESHEET_SPREADSHEET_ID without opening the sheet, so it's quick, and it is null when that
+// setting is missing or isn't a Sheets ID. The website hides a link that is null.
+function handleStudioLinks_(payload) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var studioUrl = String(ss.getUrl()).split("#")[0];
+  var schedule = ss.getSheetByName(LESSON_SCHEDULE_SHEET_NAME);
+  var timesheetId = spreadsheetIdFromSetting_(
+    PropertiesService.getScriptProperties().getProperty(TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY)
+  );
+  return {
+    ok: true,
+    lessonScheduleUrl: schedule ? studioUrl + "#gid=" + schedule.getSheetId() : studioUrl,
+    timesheetUrl: timesheetId ? "https://docs.google.com/spreadsheets/d/" + timesheetId + "/edit" : null
+  };
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -3159,12 +3249,13 @@ function hasOverride_(overrides, key) {
  * preview-timesheet-row and add-timesheet-row, so what the teacher previews is what gets written.
  */
 // planTimesheetRow_ works out the row for one lesson: which tab, the seven values for columns A to
-// G, whether a term label row goes above it, whether the lesson is already on the tab, and a list
-// of plain-English warnings. Values the teacher changed in the preview window win over the
-// script's own suggestions.
+// G, whether a term label row goes above it, whether the lesson is already on the tab, a list of
+// plain-English warnings, and a list of plain-English notes ("info") that need no action. Values
+// the teacher changed in the preview window win over the script's own suggestions.
 function planTimesheetRow_(ctx, overrides) {
   var row = ctx.found.row;
   var warnings = [];
+  var info = [];
   // Short notes like "Total Hours 1.5", reused in the error message if Google refuses the row.
   var notOnList = [];
 
@@ -3189,11 +3280,19 @@ function planTimesheetRow_(ctx, overrides) {
     );
   }
 
-  // Columns C and D: first and last name. The sign-up form's name wins; the Lesson Schedule's
-  // Student Name is the backup. The name is split at its first space.
+  // Columns C and D: first and last name. The names on this student's last time sheet row win
+  // (remembered after each add, see rememberTimesheetStudent_). Otherwise the sign-up form's name,
+  // with the Lesson Schedule's Student Name as the backup, split at its first space.
   var email = String(row["Student Email"] || "").trim().toLowerCase();
   var fullName = getStudentNameMap_()[email] || String(row["Student Name"] || "").trim();
-  var names = splitStudentName_(fullName);
+  var saved = savedTimesheetStudent_(email);
+  var savedNames = !!saved && (saved.firstName !== "" || saved.lastName !== "");
+  var names = savedNames
+    ? { first: saved.firstName, last: saved.lastName, warning: null }
+    : splitStudentName_(fullName);
+  // Whether a remembered value ends up in the row (then the preview says so).
+  var usedSaved = savedNames &&
+    !(hasOverride_(overrides, "firstName") && hasOverride_(overrides, "lastName"));
   var namesTyped = hasOverride_(overrides, "firstName") || hasOverride_(overrides, "lastName");
   var firstName = hasOverride_(overrides, "firstName")
     ? cleanCellText_(String(overrides.firstName), "First name")
@@ -3203,16 +3302,18 @@ function planTimesheetRow_(ctx, overrides) {
     : names.last;
   if (!namesTyped && names.warning) warnings.push(names.warning);
 
-  // Column F: total hours, from how long the lesson is (90 minutes is a double).
+  // Column F: total hours, from how long the lesson is. Anything over 45 minutes counts as a
+  // double (1.5); 45 minutes or less is a regular lesson (0.75). The real length is never written
+  // on the time sheet: the preview shows it, and the Lesson Schedule's note keeps it.
   var minutes = lessonMinutes_(row, ctx.studioTz);
   var hours;
   if (hasOverride_(overrides, "hours")) {
     hours = listValueOrRaw_(lists.values.hours, overrides.hours, "Total Hours");
   } else {
-    var ninetyMinutes = minutes === TIMESHEET_DOUBLE_MINUTES;
+    var overRegular = minutes !== null && minutes > TIMESHEET_REGULAR_MINUTES;
     hours = listValueOrRaw_(
       lists.values.hours,
-      ninetyMinutes ? TIMESHEET_DOUBLE_HOURS : TIMESHEET_REGULAR_HOURS,
+      overRegular ? TIMESHEET_DOUBLE_HOURS : TIMESHEET_REGULAR_HOURS,
       "Total Hours"
     );
     if (minutes === null) {
@@ -3220,10 +3321,15 @@ function planTimesheetRow_(ctx, overrides) {
         "This lesson has no end time on the Lesson Schedule, so it's counted as a regular " +
         "lesson (0.75 hours)."
       );
-    } else if (!ninetyMinutes && minutes !== 45) {
+    } else if (overRegular && minutes !== TIMESHEET_DOUBLE_MINUTES) {
       warnings.push(
-        "This lesson is " + minutes + " minutes long. The time sheet uses 0.75 for a regular " +
-        "lesson and 1.5 for a double (90 minutes), so 0.75 is filled in. Check the hours."
+        "This lesson is " + minutes + " minutes. Anything over 45 minutes counts as a double: " +
+        "1.5 hours, Lesson No. Double."
+      );
+    } else if (minutes < TIMESHEET_REGULAR_MINUTES) {
+      warnings.push(
+        "This lesson is " + minutes + " minutes, so it's 0.75 hours. If it's make-up time for a " +
+        "double you already logged, click Skip instead."
       );
     }
   }
@@ -3271,10 +3377,14 @@ function planTimesheetRow_(ctx, overrides) {
     if (mappedBlock.warning) warnings.push(mappedBlock.warning);
   }
 
-  // Column G: the music subject, from the instrument on the student's latest sign-up form.
+  // Column G: the music subject: the one on this student's last time sheet row if remembered,
+  // otherwise the instrument on their latest sign-up form.
   var subject;
   if (hasOverride_(overrides, "subject")) {
     subject = listValueOrRaw_(lists.values.instrument, overrides.subject, "Music Subject");
+  } else if (saved && saved.subject !== "") {
+    subject = listValueOrRaw_(lists.values.instrument, saved.subject, "Music Subject");
+    usedSaved = true;
   } else {
     var mappedSubject = mapInstrumentToList_(formInstrumentAnswer_(email), lists.values.instrument);
     subject = mappedSubject.value;
@@ -3316,6 +3426,12 @@ function planTimesheetRow_(ctx, overrides) {
     );
   }
 
+  if (usedSaved) info.push("Name and subject from your last time sheet row for this student.");
+
+  // The hours the lesson's length line and Time Sheet note report: those on the row already there
+  // (for a lesson that's already on the tab), or those about to be written.
+  var loggedHours = duplicateRow ? duplicateRow.cells[5] : hours;
+
   var fields = {
     lessonNo: lessonNo,
     firstName: firstName,
@@ -3336,6 +3452,9 @@ function planTimesheetRow_(ctx, overrides) {
     cells: [displayDateFromKey_(ctx.lessonDateKey), lessonNo, firstName, lastName, block, hours, subject],
     duplicate: duplicate,
     warnings: warnings,
+    info: info,
+    lengthLine: lessonLengthLine_(minutes, loggedHours),
+    loggedHours: loggedHours,
     notOnList: notOnList,
     lists: lists.values,
     mark: ctx.mark,
@@ -3402,6 +3521,17 @@ function lessonMinutes_(row, tz) {
   // A lesson that runs past midnight (rare) ends "earlier" than it starts; add a day.
   if (minutes <= 0) minutes += 24 * 60;
   return minutes;
+}
+
+// lessonLengthLine_ is the line the preview shows under the row, like "70-minute lesson, logged as
+// 1.5 hours (a double)." It gives back nothing (null) when the lesson has no end time.
+function lessonLengthLine_(minutes, hours) {
+  if (typeof minutes !== "number") return null;
+  if (hours === "" || hours === null || hours === undefined) {
+    return minutes + "-minute lesson, hours left blank.";
+  }
+  return minutes + "-minute lesson, logged as " + hours + " hours" +
+    (sameListValue_(hours, TIMESHEET_DOUBLE_HOURS) ? " (a double)" : "") + ".";
 }
 
 // clockText_ turns a time cell into text like "3:30 PM". Most times already arrive as text; a
@@ -3606,14 +3736,14 @@ function readTimesheetLists_(ts) {
   return { values: values, missingTabs: missingTabs };
 }
 
-// readYearTabRows_ reads columns A to G of every row below the title row of a school-year tab.
-// For each row it notes the row number, the date in column A as year-month-day (or nothing for
-// label rows like "Fall 2025" or "Week 1", and for blank rows), the lesson number, and the name.
+// readYearTabRows_ reads columns A to G of every row below the title row of a school-year tab,
+// down to the last row with anything in A to G (see readAtoG_). Pre-made rows below that, holding
+// only an unticked COMPLETED LESSON checkbox, are never read, so they can't count as lessons,
+// labels or duplicates. For each row it notes the row number, the date in column A as
+// year-month-day (or nothing for label rows like "Fall 2025" or "Week 1", and for blank rows),
+// the lesson number, and the name.
 function readYearTabRows_(sheet, tz) {
-  var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return [];
-  var values = sheet.getRange(2, 1, lastRow - 1, TIMESHEET_WRITE_COLUMNS).getValues();
-  return values.map(function (cells, i) {
+  return readAtoG_(sheet).slice(1).map(function (cells, i) {
     return {
       rowNumber: i + 2,
       a: cells[0],
@@ -3624,6 +3754,25 @@ function readYearTabRows_(sheet, tz) {
       cells: cells
     };
   });
+}
+
+// readAtoG_ reads columns A to G of a tab from row 1 down to the last row with anything in those
+// columns. Every other column is ignored: Google counts a row holding only an unticked checkbox
+// (FALSE in column H) as used, but for the time sheet it's still an empty row.
+function readAtoG_(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 1) return [];
+  var values = sheet.getRange(1, 1, lastRow, TIMESHEET_WRITE_COLUMNS).getValues();
+  var used = values.length;
+  while (used > 0 && values[used - 1].every(isBlankTimesheetCell_)) used--;
+  return values.slice(0, used);
+}
+
+// isBlankTimesheetCell_ says whether a time sheet cell is empty for the tool: blank, only spaces,
+// or FALSE (an unticked checkbox).
+function isBlankTimesheetCell_(value) {
+  return value === "" || value === null || value === undefined || value === false ||
+    (typeof value === "string" && value.trim() === "");
 }
 
 // timesheetDateKey_ reads column A of a time sheet row as a date, written year-month-day. A real
@@ -3660,10 +3809,12 @@ function countStudentLessons_(rows, term, first, last) {
   return { running: running, prior: prior };
 }
 
-// needsTermLabel_ decides whether a term label row (like "Fall 2026") goes above the new row: yes
-// when no row on the tab is dated in that term yet, unless the teacher already typed a label for
-// that term below the last dated row (like "Winter TERM").
+// needsTermLabel_ decides whether a term label row (like "Fall 2026") goes above the new row. Only
+// a tab that already has term label rows gets one (the 2026-2027 tab has none, and a brand-new
+// tab has none). Then: yes when no row on the tab is dated in that term yet, unless the teacher
+// already typed a label for that term below the last dated row (like "Winter TERM").
 function needsTermLabel_(rows, term) {
+  if (!tabHasTermLabels_(rows)) return false;
   var lastDated = -1;
   for (var i = 0; i < rows.length; i++) {
     if (!rows[i].dateKey) continue;
@@ -3678,6 +3829,16 @@ function needsTermLabel_(rows, term) {
     if (word.test(text)) return false;
   }
   return true;
+}
+
+// tabHasTermLabels_ says whether a tab uses term label rows: at least one row whose column A is
+// text naming Fall, Winter or Spring (like "Fall 2025" or "Winter TERM"), not a date.
+function tabHasTermLabels_(rows) {
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].dateKey || typeof rows[i].a !== "string") continue;
+    if (/\b(fall|winter|spring)\b/i.test(rows[i].a)) return true;
+  }
+  return false;
 }
 
 // findDuplicateRow_ finds a row on the tab with the same date and the same student (first and
@@ -3844,11 +4005,15 @@ function validationListRange_(rule) {
 // Phase 6 — writing
 // ──────────────────────────────────────────────────────────────────────
 
-// appendTimesheetRow_ writes the planned row directly below the last used row of the school-year
-// tab (creating the tab first if this is the school year's first lesson). When the lesson starts
-// a new term, the term label row goes in just above it. Both rows go in with one write, columns A
-// to G only. Column A gets a real date with the M/d/yyyy format, made in the time sheet's own
-// time zone so it can't land a day early. It gives back the lesson's row number.
+// appendTimesheetRow_ writes the planned row on the school-year tab (creating the tab first if this
+// is the school year's first lesson). The row lands right below the last row with anything in
+// columns A to G: an empty pre-made row if there is one (its checkbox stays), or a new row added
+// at the bottom. Either way it first gets the format and dropdowns of the lesson row above it,
+// across the whole table, with no values. When the lesson starts a new term on a tab that uses
+// term label rows, the label row goes in just above it. Both rows go in with one write, columns A
+// to G only: H, I and J are never written, so the checkbox is never ticked. Column A gets a real
+// date, made in the time sheet's own time zone so it can't land a day early. It gives back the
+// lesson's row number.
 function appendTimesheetRow_(ctx, plan) {
   var sheet = findYearTab_(ctx.ts, plan.tab);
   var createdTab = false;
@@ -3870,10 +4035,23 @@ function appendTimesheetRow_(ctx, plan) {
     f.subject
   ]);
 
-  var firstRow = sheet.getLastRow() + 1;
+  var landing = landingRow_(sheet, ctx.tsTz);
+  var firstRow = landing.row;
   var lessonRow = firstRow + rows.length - 1;
+  var width = timesheetTableWidth_(sheet);
+  requireFreeLandingRows_(sheet, firstRow, rows.length, width, plan.tab, ctx.tsTz);
+  // A tab that ends here gets a new row at the bottom.
   ensureSheetRows_(sheet, lessonRow);
-  sheet.getRange(lessonRow, 1).setNumberFormat("M/d/yyyy");
+  if (landing.lessonRowAbove) {
+    copyLessonRowLook_(sheet, landing.lessonRowAbove, firstRow, rows.length, width);
+  }
+  // Column A shows the date the way the row above does; without a date format there, M/d/yyyy.
+  var dateCell = sheet.getRange(lessonRow, 1);
+  if (!isDateFormat_(dateCell.getNumberFormat())) dateCell.setNumberFormat("M/d/yyyy");
+  // Lesson No. (B) and Total Hours (F) always show as plain numbers, whatever format the landing
+  // row had: a date format there once showed lesson 2 as 1/1/1900.
+  sheet.getRange(lessonRow, 2).setNumberFormat("0");
+  sheet.getRange(lessonRow, 6).setNumberFormat("0.0#");
   try {
     sheet.getRange(firstRow, 1, rows.length, TIMESHEET_WRITE_COLUMNS).setValues(rows);
     // Sheets saves writes in batches; flushing here makes any refusal show up now, inside this
@@ -3895,6 +4073,90 @@ function appendTimesheetRow_(ctx, plan) {
     labelRowNumber: plan.addsTermLabel ? firstRow : null,
     createdTab: createdTab
   };
+}
+
+// landingRow_ finds where the next row goes on a school-year tab: right below the last row with
+// anything in columns A to G (see readAtoG_). It also finds the nearest lesson row above that spot
+// (a date in column A; label rows are skipped), whose look the new row copies, or null when there
+// is none (a new tab). Gives back { row, lessonRowAbove }.
+function landingRow_(sheet, tz) {
+  var values = readAtoG_(sheet);
+  var lessonRowAbove = null;
+  for (var i = values.length - 1; i >= 1; i--) {
+    if (timesheetDateKey_(values[i][0], tz)) {
+      lessonRowAbove = i + 1;
+      break;
+    }
+  }
+  return { row: Math.max(values.length, 1) + 1, lessonRowAbove: lessonRowAbove };
+}
+
+// timesheetTableWidth_ gives how many columns a school-year tab's table has: up to the last column
+// with a title in row 1 (J, "Paid on paydate", on 2026-2027), and never fewer than A to G.
+function timesheetTableWidth_(sheet) {
+  var lastCol = Math.min(sheet.getLastColumn(), sheet.getMaxColumns());
+  if (lastCol <= TIMESHEET_WRITE_COLUMNS) return TIMESHEET_WRITE_COLUMNS;
+  var titles = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  for (var c = lastCol; c > TIMESHEET_WRITE_COLUMNS; c--) {
+    if (!isBlankTimesheetCell_(titles[c - 1])) return c;
+  }
+  return TIMESHEET_WRITE_COLUMNS;
+}
+
+// requireFreeLandingRows_ stops before anything is written if a landing row already holds
+// something past column G: a ticked box, a signature or a pay date typed into an empty row. A
+// new lesson must never sit next to those. Unticked boxes, blanks and formulas are fine, and rows
+// past the bottom of the tab don't exist yet.
+function requireFreeLandingRows_(sheet, firstRow, count, width, tabName, tz) {
+  var extra = width - TIMESHEET_WRITE_COLUMNS;
+  var existing = Math.min(count, sheet.getMaxRows() - firstRow + 1);
+  if (extra < 1 || existing < 1) return;
+  var range = sheet.getRange(firstRow, TIMESHEET_WRITE_COLUMNS + 1, existing, extra);
+  var values = range.getValues();
+  var formulas = range.getFormulas();
+  for (var r = 0; r < existing; r++) {
+    for (var c = 0; c < extra; c++) {
+      var value = values[r][c];
+      if (isBlankTimesheetCell_(value) || formulas[r][c]) continue;
+      var where = "Row " + (firstRow + r) + " of " + tabName + " is where this lesson would go, but " +
+        "its column " + columnLetter_(TIMESHEET_WRITE_COLUMNS + 1 + c);
+      throw new Error(
+        (value === true
+          ? where + " box is ticked. Untick it"
+          : where + ' already holds "' + displayCells_([value], tz)[0] + '". Clear that cell') +
+        " (or fill in that row's columns A to G by hand), then try again. Nothing was added, and " +
+        "the lesson wasn't marked."
+      );
+    }
+  }
+}
+
+// copyLessonRowLook_ gives each of `count` rows starting at `firstRow` the format (fill color,
+// bold, date format, borders) and the dropdowns and checkbox of lesson row `sourceRow`, across
+// the whole table. No values are copied. (A format-only paste can leave dropdowns out, so they
+// are pasted on their own too.)
+function copyLessonRowLook_(sheet, sourceRow, firstRow, count, width) {
+  var source = sheet.getRange(sourceRow, 1, 1, width);
+  for (var r = firstRow; r < firstRow + count; r++) {
+    var target = sheet.getRange(r, 1, 1, width);
+    source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+    source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_DATA_VALIDATION, false);
+  }
+}
+
+// isDateFormat_ says whether a number format shows a date: it has a day or a year in it, like
+// "M/d/yyyy" (text in quotes or brackets, like a currency name, doesn't count).
+function isDateFormat_(format) {
+  return /[dy]/i.test(String(format || "").replace(/"[^"]*"|\[[^\]]*\]/g, ""));
+}
+
+// columnLetter_ turns a column number into its letters: 8 → "H", 10 → "J", 27 → "AA".
+function columnLetter_(column) {
+  var letters = "";
+  for (var n = column; n > 0; n = Math.floor((n - 1) / 26)) {
+    letters = String.fromCharCode(65 + ((n - 1) % 26)) + letters;
+  }
+  return letters;
 }
 
 // timesheetWriteProblem_ turns Google's error from a refused write into a plain-English message
@@ -3929,10 +4191,10 @@ function timesheetWriteProblem_(err, plan, sheet, firstRow, count) {
   return lead + outcome + " (Google said: " + raw + ")";
 }
 
-// createYearTab_ makes a new school-year tab (like "2026-2027") just before the newest existing
+// createYearTab_ makes a new school-year tab (like "2027-2028") just before the newest existing
 // one, copying from it: the title row with its formatting, the frozen rows and columns, the
-// column widths, and the dropdowns on columns B, E, F and G (taken from one of its lesson rows).
-// No lesson rows are copied.
+// column widths, and the dropdowns and checkboxes of every column (taken from its newest lesson
+// row). No lesson rows are copied.
 function createYearTab_(ts, name, tz) {
   var template = newestYearTab_(ts);
   if (!template) {
@@ -3955,7 +4217,7 @@ function createYearTab_(ts, name, tz) {
     for (var c = 1; c <= lastCol; c++) {
       sheet.setColumnWidth(c, template.getColumnWidth(c));
     }
-    copyYearTabDropdowns_(template, sheet, tz);
+    copyYearTabDropdowns_(template, sheet, tz, timesheetTableWidth_(template));
     return sheet;
   } catch (err) {
     throw new Error(
@@ -3966,20 +4228,20 @@ function createYearTab_(ts, name, tz) {
   }
 }
 
-// copyYearTabDropdowns_ copies the dropdowns of columns B, E, F and G from the template tab's
-// newest lesson row that has one, onto every row below the title on the new tab.
-function copyYearTabDropdowns_(template, sheet, tz) {
+// copyYearTabDropdowns_ copies the rule (dropdown or checkbox) of every column of the table, as
+// it is on the template tab's newest lesson row, onto every row below the title on the new tab.
+// A column with no rule on that row gets none.
+function copyYearTabDropdowns_(template, sheet, tz, width) {
   var rows = readYearTabRows_(template, tz);
-  if (rows.length === 0) return;
-  [2, 5, 6, 7].forEach(function (column) {
-    // One read per column: every row's dropdown rule for that column.
-    var rules = template.getRange(2, column, rows.length, 1).getDataValidations();
-    for (var i = rows.length - 1; i >= 0; i--) {
-      if (!rows[i].dateKey || !rules[i][0]) continue;
-      sheet.getRange(2, column, sheet.getMaxRows() - 1, 1).setDataValidation(rules[i][0]);
-      return;
+  for (var i = rows.length - 1; i >= 0; i--) {
+    if (!rows[i].dateKey) continue;
+    // One read: that row's rule for each column.
+    var rules = template.getRange(rows[i].rowNumber, 1, 1, width).getDataValidations()[0];
+    for (var c = 0; c < width; c++) {
+      if (rules[c]) sheet.getRange(2, c + 1, sheet.getMaxRows() - 1, 1).setDataValidation(rules[c]);
     }
-  });
+    return;
+  }
 }
 
 // ensureSheetRows_ adds empty rows at the bottom of a tab if it has fewer than `needed` rows.
@@ -4009,9 +4271,70 @@ function writeTimesheetMark_(found, text, tabName, rowNumber) {
 }
 
 // addedMarkText_ is the note for a lesson that is on the time sheet: "Added" and today's date in
-// the studio spreadsheet's time zone, like "Added 10/7/2026".
-function addedMarkText_(studioTz) {
-  return "Added " + Utilities.formatDate(new Date(), studioTz, "M/d/yyyy");
+// the studio spreadsheet's time zone, like "Added 10/7/2026". When the lesson wasn't 45 or 90
+// minutes long, its real length and the hours logged follow, like
+// "Added 10/7/2026 (70 min, logged as 1.5)": the time sheet itself never shows the real length.
+// Everything that reads the note only looks at the word "Added" at the start.
+function addedMarkText_(studioTz, minutes, hours) {
+  var text = "Added " + Utilities.formatDate(new Date(), studioTz, "M/d/yyyy");
+  if (typeof minutes !== "number" || minutes === TIMESHEET_REGULAR_MINUTES ||
+      minutes === TIMESHEET_DOUBLE_MINUTES) {
+    return text;
+  }
+  var blank = hours === "" || hours === null || hours === undefined;
+  return text + " (" + minutes + " min" + (blank ? "" : ", logged as " + hours) + ")";
+}
+
+// savedTimesheetStudent_ gives back how a student was written on their last time sheet row
+// ({ firstName, lastName, subject }, saved by rememberTimesheetStudent_), or nothing (null) when
+// nothing was saved for them or what's saved can't be read.
+function savedTimesheetStudent_(email) {
+  var clean = String(email || "").trim().toLowerCase();
+  if (!clean) return null;
+  var raw = PropertiesService.getScriptProperties().getProperty(TIMESHEET_STUDENT_PROPERTY_PREFIX + clean);
+  if (!raw) return null;
+  try {
+    var saved = JSON.parse(raw);
+    if (!saved || typeof saved !== "object") return null;
+    var out = {
+      firstName: savedText_(saved.firstName),
+      lastName: savedText_(saved.lastName),
+      subject: savedText_(saved.subject)
+    };
+    return out.firstName || out.lastName || out.subject ? out : null;
+  } catch (err) {
+    Logger.log("Couldn't read the saved time sheet names for " + clean + ": " + err);
+    return null;
+  }
+}
+
+// savedText_ reads one saved value as trimmed text ("" when missing).
+function savedText_(value) {
+  return String(value === null || value === undefined ? "" : value).trim();
+}
+
+// rememberTimesheetStudent_ saves the first name, last name and music subject just written for a
+// student (Script Property TIMESHEET_STUDENT:<lowercase email>, as JSON), so their next row starts
+// from the same spelling. It's a convenience: if saving fails, the log says so and the add
+// carries on.
+function rememberTimesheetStudent_(email, fields) {
+  var clean = String(email || "").trim().toLowerCase();
+  if (!clean) return;
+  try {
+    PropertiesService.getScriptProperties().setProperty(
+      TIMESHEET_STUDENT_PROPERTY_PREFIX + clean,
+      JSON.stringify({
+        firstName: savedText_(fields.firstName),
+        lastName: savedText_(fields.lastName),
+        subject: savedText_(fields.subject)
+      })
+    );
+  } catch (err) {
+    Logger.log(
+      "Couldn't save the time sheet names for " + clean + " (the lesson was still added): " +
+      (err && err.message ? err.message : err)
+    );
+  }
 }
 
 // isAddedMark_ and isSkippedMark_ read a lesson's Time Sheet note.
@@ -4169,7 +4492,8 @@ function effectiveUserEmail_() {
 // onFormSubmit runs automatically every time a student submits the sign-up Google Form (it is
 // set up as a "trigger": an instruction telling Google to run this on each new form answer).
 // It copies the student's answers onto their own tab (named after their email), creating the
-// tab the first time, then creates their personal Drive folder and shares the class folder.
+// tab the first time, then creates their personal Drive folder, shares the class folder, and
+// refreshes the Lesson Schedule's Student Email and Student Name dropdowns.
 function onFormSubmit(e) {
   // Only a real form-submit trigger may run this (see the SAFETY RULE above api). A real event
   // carries the Sheet range the answers landed in; a web page can't fake one, because
@@ -4250,6 +4574,15 @@ function onFormSubmit(e) {
   } catch (err) {
     Logger.log("grantClassResourcesViewerForStudent_ failed for " + email + ": " + err);
   }
+
+  // Refresh the Lesson Schedule's Student Email and Student Name dropdowns, so the new student
+  // can be picked there. Like the steps above, this never stops the answers being recorded.
+  try {
+    var scheduleSheet = ss.getSheetByName(LESSON_SCHEDULE_SHEET_NAME);
+    if (scheduleSheet) applyLessonScheduleDropdowns_(scheduleSheet, false);
+  } catch (err) {
+    Logger.log("Lesson Schedule dropdowns weren't refreshed after " + email + " signed up: " + err);
+  }
 }
 
 /**
@@ -4328,6 +4661,9 @@ function grantClassResourcesViewerForStudent_(studentEmail) {
 // Schedule, Lesson Recaps, every per-student tab) and applies warning-only
 // protection to the auto-managed columns ("Status", "Calendar Event ID",
 // "Time Sheet") on the Lesson Schedule tab, adding the last two if missing.
+// It also gives the Lesson Schedule's Student Email, Student Name and Lesson
+// Block columns warning-only dropdowns (run it again after the time sheet's
+// Block list changes; onFormSubmit keeps the email and name lists current).
 //
 // New per-student tabs created by `onFormSubmit` are styled at creation,
 // so the teacher only ever needs to run setupSheetFormatting() once after
@@ -4421,8 +4757,9 @@ function resolveMusicStudioSpreadsheet_() {
  * Idempotent — safe to run repeatedly.
  */
 // setupSheetFormatting is run by hand from the Apps Script editor (not by the website). It styles
-// every tab in the studio spreadsheet with the studio's colors and adds "please don't edit"
-// warnings to the columns the website manages. Running it again is harmless.
+// every tab in the studio spreadsheet with the studio's colors, adds "please don't edit"
+// warnings to the columns the website manages, and gives the Lesson Schedule's Student Email,
+// Student Name and Lesson Block columns their dropdowns. Running it again is harmless.
 function setupSheetFormatting() {
   // Only a person running it from the editor (see the SAFETY RULE above api).
   requireEditorRun_("setupSheetFormatting");
@@ -4440,11 +4777,19 @@ function setupSheetFormatting() {
     summary.skipped.push("Form Responses 1 (not found)");
   }
 
-  // Style the Lesson Schedule tab, including the warnings on the website-managed columns.
+  // Style the Lesson Schedule tab, including the warnings on the website-managed columns, then
+  // give Student Email, Student Name and Lesson Block their dropdowns. A problem with the
+  // dropdowns is noted in the log and never stops the formatting.
   var schedule = ss.getSheetByName(LESSON_SCHEDULE_SHEET_NAME);
+  var dropdowns = [];
   if (schedule) {
     formatLessonScheduleSheet_(schedule);
     summary.formatted.push(LESSON_SCHEDULE_SHEET_NAME);
+    try {
+      dropdowns = applyLessonScheduleDropdowns_(schedule, true);
+    } catch (err) {
+      dropdowns = ["not added (" + (err && err.message ? err.message : err) + ")"];
+    }
   } else {
     summary.skipped.push(LESSON_SCHEDULE_SHEET_NAME + " (not found)");
   }
@@ -4479,7 +4824,13 @@ function setupSheetFormatting() {
   if (summary.skipped.length > 0) {
     Logger.log("Skipped:   " + summary.skipped.join(", "));
   }
-  return { ok: true, formatted: summary.formatted, skipped: summary.skipped };
+  if (dropdowns.length > 0) {
+    Logger.log(
+      "Lesson Schedule dropdowns (anything else typed in gets a warning, never refused): " +
+      dropdowns.join("; ")
+    );
+  }
+  return { ok: true, formatted: summary.formatted, skipped: summary.skipped, dropdowns: dropdowns };
 }
 
 /**
@@ -4591,6 +4942,94 @@ function formatLessonScheduleSheet_(sheet) {
     highlightAutoManagedColumn_(sheet, idx + 1, name);
     protectAutoManagedColumn_(sheet, idx + 1);
   }
+}
+
+// applyLessonScheduleDropdowns_ puts dropdowns on three Lesson Schedule columns, found by their
+// titles (never by their place), from row 2 to the bottom of the tab:
+//   Student Email = each student's email from the roster, once, A to Z,
+//   Student Name  = each student's name from the roster, once, A to Z,
+//   Lesson Block  = the time sheet's Block list, with the same items, order and spelling (only
+//                   when includeBlock is true; see lessonBlockChoices_).
+// Each one shows its list but only warns about anything else typed in; nothing is refused. Every
+// other column's rules (like Lesson Date's) are left alone. It gives back one line per column for
+// the log, like "Student Email: 12 emails".
+function applyLessonScheduleDropdowns_(sheet, includeBlock) {
+  var lastCol = sheet.getLastColumn();
+  var headers = lastCol > 0 ? sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+  var roster = getStudentRoster_();
+  var lines = [
+    setColumnDropdown_(sheet, headers, "Student Email",
+      sortedUnique_(roster.map(function (s) { return s.email; })), "emails"),
+    setColumnDropdown_(sheet, headers, "Student Name",
+      sortedUnique_(roster.map(function (s) { return s.name; })), "names")
+  ];
+  if (includeBlock) {
+    var blocks = lessonBlockChoices_();
+    lines.push(setColumnDropdown_(sheet, headers, "Lesson Block", blocks.list,
+      blocks.fromTimesheet ? "blocks from the time sheet" : "blocks from the built-in list"));
+  }
+  return lines;
+}
+
+// setColumnDropdown_ puts one warning-only dropdown on the Lesson Schedule column with the given
+// title, from row 2 to the bottom, replacing that column's old rule. It gives back a line for the
+// log. A missing column or an empty list is skipped (and the log says so).
+function setColumnDropdown_(sheet, headers, title, choices, noun) {
+  var index = headerIndex_(headers, title);
+  if (index === -1) return title + ": no column with that title, so no dropdown";
+  if (choices.length === 0) return title + ": nothing to list yet, so no dropdown";
+  var rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(choices, true)
+    .setAllowInvalid(true)
+    .build();
+  var maxRows = Math.max(sheet.getMaxRows(), 2);
+  sheet.getRange(2, index + 1, maxRows - 1, 1).setDataValidation(rule);
+  return title + ": " + choices.length + " " + noun;
+}
+
+// sortedUnique_ tidies a list for a dropdown: no blanks, each value once, A to Z (capital letters
+// don't change the order).
+function sortedUnique_(values) {
+  var seen = {};
+  var out = [];
+  values.forEach(function (value) {
+    var text = String(value === null || value === undefined ? "" : value).trim();
+    if (!text || seen[text]) return;
+    seen[text] = true;
+    out.push(text);
+  });
+  return out.sort(function (a, b) {
+    var ka = a.toLowerCase();
+    var kb = b.toLowerCase();
+    if (ka !== kb) return ka < kb ? -1 : 1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+}
+
+// lessonBlockChoices_ gives the Lesson Block dropdown's choices: the time sheet's Block list,
+// exactly as it is there (so "1PM  Shadow Block" keeps its two spaces). If the time sheet isn't
+// connected, can't be opened or has no Block list, it uses the built-in copy
+// (LESSON_BLOCK_FALLBACK_LIST) and the log says why. Gives back { list, fromTimesheet }.
+function lessonBlockChoices_() {
+  var id = spreadsheetIdFromSetting_(
+    PropertiesService.getScriptProperties().getProperty(TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY)
+  );
+  var why;
+  if (!id) {
+    why = TIMESHEET_SPREADSHEET_ID_PROPERTY_KEY + " isn't set";
+  } else {
+    try {
+      var block = readTimesheetLists_(SpreadsheetApp.openById(id)).values.block;
+      if (block.length > 0) {
+        return { list: block.map(function (value) { return String(value); }), fromTimesheet: true };
+      }
+      why = 'the time sheet has no "' + TIMESHEET_LIST_TABS.block + '" list';
+    } catch (err) {
+      why = "the time sheet couldn't be opened" + googleSaid_(err);
+    }
+  }
+  Logger.log("Lesson Block dropdown: " + why + ", so the built-in Block list was used.");
+  return { list: LESSON_BLOCK_FALLBACK_LIST.slice(), fromTimesheet: false };
 }
 
 /**

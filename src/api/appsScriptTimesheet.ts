@@ -12,8 +12,10 @@
  *      returns its link, the start date, and the dropdown lists.
  *   2. Teacher clicks Preview on an ended lesson → `previewTimesheetRow()` returns the exact
  *      A-G row, the tab it goes to, and plain-English warnings. Nothing is written.
- *   3. Teacher adjusts values if needed → `addTimesheetRow()` appends that exact row and marks
- *      the lesson "Added <date>" on the Lesson Schedule. Retrying never adds a second row.
+ *   3. Teacher adjusts values if needed → `addTimesheetRow()` writes that exact row (columns A-G,
+ *      in the first empty row under the last one filled in) and marks the lesson "Added <date>"
+ *      on the Lesson Schedule, plus "(70 min, logged as 1.5)" when it wasn't 45 or 90 minutes
+ *      long. Retrying never adds a second row.
  *   4. Or Skip → `skipTimesheetRow()` marks the lesson "Skipped" and never touches the time sheet.
  */
 // In plain English: this file carries the Dashboard's time sheet requests to the Apps Script
@@ -79,8 +81,12 @@ export type TimesheetPreview = {
   /** Set when the same date + student is already on the tab (adding then only marks it). */
   duplicate: { rowNumber: number; cells: TimesheetCell[] } | null;
   warnings: string[];
+  /** Plain-English notes that need no action, like "Name and subject from your last time sheet row for this student." */
+  info: string[];
+  /** The line under the row, like "70-minute lesson, logged as 1.5 hours (a double)."; null without an end time. */
+  lengthLine: string | null;
   lists: TimesheetLists;
-  /** The lesson's current Time Sheet note on the Lesson Schedule ("" when none). */
+  /** The lesson's current Time Sheet note on the Lesson Schedule ("" when none), like "Added 10/7/2026". */
   mark: string;
   lesson: {
     studentEmail: string;

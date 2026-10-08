@@ -45,8 +45,10 @@ export type ScheduledLesson = {
   calendarEventId: string;
   /**
    * Phase 6: what happened to this lesson on the payroll time sheet, from the sheet's
-   * "Time Sheet" column: "Added 10/7/2026" once it's on the time sheet, "Skipped", or an
-   * empty string when it hasn't been logged yet (also when the column doesn't exist yet).
+   * "Time Sheet" column: "Added 10/7/2026" once it's on the time sheet (with "(70 min, logged
+   * as 1.5)" after it when the lesson wasn't 45 or 90 minutes long), "Skipped", or an empty
+   * string when it hasn't been logged yet (also when the column doesn't exist yet). Any text
+   * at all keeps the lesson off the Time sheet card.
    * Written only by the add-timesheet-row and skip-timesheet-row Apps Script actions.
    */
   timeSheet: string;

@@ -3,8 +3,8 @@
 // the payroll time sheet for one lesson (date, lesson number, first and last name, block, hours,
 // music subject), lets the teacher change any of those values, lists anything worth checking in
 // plain words, and then asks the Apps Script (apps-script/Code.gs) to add the row. The messages to
-// Google are sent by src/api/appsScriptTimesheet.ts. Columns H and I (the signature and the pay
-// date) are never shown or written: other people fill those in.
+// Google are sent by src/api/appsScriptTimesheet.ts. Columns H, I and J (the COMPLETED LESSON box
+// he ticks, the signature and the pay date) are never shown or written.
 // Like the other pop-ups, it is written with React: each function below describes what to show,
 // and React redraws it whenever the information it remembers ("state") changes.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -282,7 +282,8 @@ function RowEditor({
     <div className="modal-card__body timesheet-modal__body">
       {/* Where the row goes. */}
       <p className="timesheet-modal__where">
-        Goes on tab <strong>{preview.tab}</strong> of <strong>{preview.sheetTitle}</strong>, below the last row.
+        Goes on tab <strong>{preview.tab}</strong> of <strong>{preview.sheetTitle}</strong>, right under the last
+        filled-in row.
         {preview.createsTab && (
           <>
             {" "}
@@ -300,7 +301,10 @@ function RowEditor({
       </p>
 
       {preview.duplicate ? (
-        <ExistingRow preview={preview} />
+        <>
+          <ExistingRow preview={preview} />
+          {preview.lengthLine && <p className="timesheet-form__length">{preview.lengthLine}</p>}
+        </>
       ) : (
         <div className="timesheet-form">
           <div className="timesheet-field">
@@ -332,9 +336,16 @@ function RowEditor({
             disabled={busy}
             onChange={(v) => onField("subject", v)}
           />
+          {/* How long the lesson really was, and what it's logged as (never written on the sheet). */}
+          {preview.lengthLine && <p className="timesheet-form__length">{preview.lengthLine}</p>}
+          {(preview.info ?? []).map((line) => (
+            <p key={line} className="muted timesheet-form__note">
+              {line}
+            </p>
+          ))}
           <p className="muted timesheet-form__note">
-            Dir. of Music Sign. and Paid on paydate (columns H and I) stay blank for the signature and the
-            business office.
+            Only columns A to G are filled in. COMPLETED LESSON, Dir. of Music Sign. and Paid on paydate stay
+            as they are, for you, the signature and the business office.
           </p>
         </div>
       )}

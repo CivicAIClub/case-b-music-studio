@@ -1,14 +1,21 @@
 // fake-google.js: pretend versions of the Google services Code.gs uses, for tests.
 //
 // FakeSpreadsheet / FakeSheet / FakeRange copy just enough of SpreadsheetApp for the studio
-// sheet and the time sheet: values, number formats, dropdown rules, frozen panes, column widths,
-// protections, inserting tabs and rows. Every change is recorded in spreadsheet.writes, so tests
-// can check exactly which cells were written.
+// sheet and the time sheet: values, number formats, dropdown rules, checkboxes, frozen panes,
+// column widths, protections, inserting tabs and rows, and format-only / dropdown-only pastes.
+// Every change is recorded in spreadsheet.writes, so tests can check exactly which cells were
+// written.
 //
-// Dropdown rules: FakeRule({ range, allowInvalid }) is a "list from a range" dropdown. With
-// spreadsheet option rejectInvalidScriptWrites: true, a script write that a "Reject input" rule
-// (allowInvalid: false) doesn't allow throws like a refused write would, and nothing is written.
-// That lets tests check the plain-English error path; it is NOT a claim about what Google does.
+// Dropdown rules: FakeRule({ range, allowInvalid }) is a "list from a range" dropdown; type
+// "VALUE_IN_LIST" takes a typed-in list (what SpreadsheetApp.newDataValidation() builds here), and
+// type "CHECKBOX" is a checkbox (an unticked box holds FALSE). With spreadsheet option
+// rejectInvalidScriptWrites: true, a script write that a "Reject input" rule (allowInvalid: false)
+// doesn't allow throws like a refused write would, and nothing is written. That lets tests check
+// the plain-English error path; it is NOT a claim about what Google does.
+//
+// Pastes: copyTo(destination) copies everything; with CopyPasteType.PASTE_FORMAT it copies only
+// number formats and styles (deliberately NOT dropdowns, the stricter reading of Google's docs,
+// so code must also paste PASTE_DATA_VALIDATION), and with PASTE_DATA_VALIDATION only the rules.
 import { formatDate, makeParseDate } from "./gas-sandbox.js";
 
 const isDate = (v) => Object.prototype.toString.call(v) === "[object Date]";
@@ -28,21 +35,25 @@ export function cellName(row, col) {
 const isBlank = (v) => v === "" || v === null || v === undefined;
 
 // A dropdown rule. type "VALUE_IN_RANGE" takes its choices from `range` (a FakeRange);
-// "VALUE_IN_LIST" from `list`. allowInvalid false = "Reject input", true = "Show a warning".
+// "VALUE_IN_LIST" from `list`; "CHECKBOX" is a checkbox (TRUE or FALSE).
+// allowInvalid false = "Reject input", true = "Show a warning".
 export class FakeRule {
-  constructor({ type = "VALUE_IN_RANGE", range = null, list = null, allowInvalid = false } = {}) {
+  constructor({ type = "VALUE_IN_RANGE", range = null, list = null, allowInvalid = false, showDropdown = true } = {}) {
     this.type = type;
     this.range = range;
     this.list = list;
     this.allowInvalid = allowInvalid;
+    this.showDropdown = showDropdown;
   }
   getCriteriaType() { return this.type; }
   getCriteriaValues() {
-    return this.type === "VALUE_IN_RANGE" ? [this.range, true] : [this.list.slice(), true];
+    if (this.type === "CHECKBOX") return [];
+    return this.type === "VALUE_IN_RANGE" ? [this.range, this.showDropdown] : [this.list.slice(), this.showDropdown];
   }
   getAllowInvalid() { return this.allowInvalid; }
   allows(value) {
     if (isBlank(value)) return true;
+    if (this.type === "CHECKBOX") return typeof value === "boolean";
     const choices = this.type === "VALUE_IN_RANGE"
       ? this.range.getValues().flat().filter((v) => !isBlank(v))
       : this.list;
@@ -60,6 +71,7 @@ export class FakeSpreadsheet {
     this.SandboxDate = SandboxDate;
     this.sheets = [];
     this.writes = [];
+    this.nextSheetId = 0;
   }
   getId() { return this.id; }
   getName() { return this.name; }
@@ -88,6 +100,9 @@ export class FakeSheet {
   constructor(ss, name, { maxRows = 1000, maxColumns = 26 } = {}) {
     this.ss = ss;
     this.name = name;
+    // Like Google: the first tab is 0, later ones get big made-up numbers.
+    this.sheetId = ss.nextSheetId === 0 ? 0 : 1000000 + ss.nextSheetId * 7919;
+    ss.nextSheetId++;
     this.maxRows = maxRows;
     this.maxColumns = maxColumns;
     this.cells = new Map(); // "row,col" → { value, format, rule, style, note }
@@ -99,7 +114,7 @@ export class FakeSheet {
   }
   cell(row, col) {
     const key = row + "," + col;
-    if (!this.cells.has(key)) this.cells.set(key, { value: "", format: null, rule: null, style: {}, note: null });
+    if (!this.cells.has(key)) this.cells.set(key, { value: "", format: null, rule: null, style: {}, note: null, formula: "" });
     return this.cells.get(key);
   }
   peek(row, col) { return this.cells.get(row + "," + col) || null; }
@@ -110,6 +125,7 @@ export class FakeSheet {
     values.forEach((v, i) => { this.cell(row, i + 1).value = isDate(v) ? new Date(v.getTime()) : v; });
   }
   getName() { return this.name; }
+  getSheetId() { return this.sheetId; }
   getParent() { return this.ss; }
   getIndex() { return this.ss.sheets.indexOf(this) + 1; }
   getMaxRows() { return this.maxRows; }
@@ -205,6 +221,7 @@ export class FakeRange {
     });
   }
   getValue() { return this.getValues()[0][0]; }
+  getFormulas() { return this.grid((r, c) => { const cell = this.sheet.peek(r, c); return (cell && cell.formula) || ""; }); }
   setValues(values) {
     if (values.length !== this.numRows || values.some((line) => line.length !== this.numCols)) {
       throw new Error(`The number of rows or columns in the data does not match the range (${this.numRows}x${this.numCols}).`);
@@ -248,19 +265,26 @@ export class FakeRange {
     this.sheet.ss.record({ kind: "validation", sheet: this.sheet.name, row: this.row, col: this.col, numRows: this.numRows, numCols: this.numCols, rule });
     return this;
   }
-  // Copies values, number formats, styles and dropdowns, like a normal paste.
-  copyTo(destination) {
+  // Copies values, number formats, styles and dropdowns, like a normal paste. With a paste type,
+  // PASTE_FORMAT copies only number formats and styles, PASTE_DATA_VALIDATION only dropdowns.
+  copyTo(destination, type = "PASTE_NORMAL") {
+    const formats = type === "PASTE_NORMAL" || type === "PASTE_FORMAT";
+    const rules = type === "PASTE_NORMAL" || type === "PASTE_DATA_VALIDATION";
+    const values = type === "PASTE_NORMAL";
+    if (!formats && !rules) throw new Error(`FakeRange.copyTo: paste type ${type} is not supported`);
     for (let r = 0; r < this.numRows; r++) {
       for (let c = 0; c < this.numCols; c++) {
         const from = this.sheet.peek(this.row + r, this.col + c);
         const to = destination.sheet.cell(destination.row + r, destination.col + c);
-        to.value = from ? (isDate(from.value) ? new Date(from.value.getTime()) : from.value) : "";
-        to.format = from ? from.format : null;
-        to.style = from ? Object.assign({}, from.style) : {};
-        to.rule = from ? from.rule : null;
+        if (values) to.value = from ? (isDate(from.value) ? new Date(from.value.getTime()) : from.value) : "";
+        if (formats) {
+          to.format = from ? from.format : null;
+          to.style = from ? Object.assign({}, from.style) : {};
+        }
+        if (rules) to.rule = from ? from.rule : null;
       }
     }
-    destination.sheet.ss.record({ kind: "copy", from: this.sheet.name, sheet: destination.sheet.name, row: destination.row, col: destination.col, numRows: this.numRows, numCols: this.numCols });
+    destination.sheet.ss.record({ kind: "copy", type, from: this.sheet.name, fromRow: this.row, sheet: destination.sheet.name, row: destination.row, col: destination.col, numRows: this.numRows, numCols: this.numCols });
   }
   style(key, value) {
     this.forEachCell((r, c) => { this.sheet.cell(r, c).style[key] = value; });
@@ -319,6 +343,8 @@ export function fakeGlobals({
   const openCalls = [];
   const store = Object.assign({}, props);
   let lockHeld = false;
+  // Test hook: (key) => true makes setProperty throw for that key, like a full or busy store.
+  let failSetProperty = null;
   let currentActive = activeUser === undefined ? effectiveUser : activeUser;
 
   const SpreadsheetApp = {
@@ -330,7 +356,31 @@ export function fakeGlobals({
       return ss;
     },
     flush: () => {},
-    DataValidationCriteria: { VALUE_IN_RANGE: "VALUE_IN_RANGE", VALUE_IN_LIST: "VALUE_IN_LIST" },
+    // newDataValidation().requireValueInList(list, showDropdown).setAllowInvalid(b).build()
+    newDataValidation: () => {
+      const spec = { type: null, list: null, showDropdown: true, allowInvalid: false };
+      const builder = {
+        requireValueInList: (list, showDropdown = true) => {
+          spec.type = "VALUE_IN_LIST";
+          spec.list = Array.from(list);
+          spec.showDropdown = showDropdown;
+          return builder;
+        },
+        requireCheckbox: () => { spec.type = "CHECKBOX"; return builder; },
+        setAllowInvalid: (allow) => { spec.allowInvalid = !!allow; return builder; },
+        build: () => {
+          if (!spec.type) throw new Error("newDataValidation fake: no criteria set");
+          return new FakeRule(spec);
+        },
+      };
+      return builder;
+    },
+    CopyPasteType: {
+      PASTE_NORMAL: "PASTE_NORMAL",
+      PASTE_FORMAT: "PASTE_FORMAT",
+      PASTE_DATA_VALIDATION: "PASTE_DATA_VALIDATION",
+    },
+    DataValidationCriteria: { VALUE_IN_RANGE: "VALUE_IN_RANGE", VALUE_IN_LIST: "VALUE_IN_LIST", CHECKBOX: "CHECKBOX" },
     ProtectionType: { RANGE: "RANGE", SHEET: "SHEET" },
     BandingTheme: { LIGHT_GREY: "LIGHT_GREY" },
   };
@@ -338,7 +388,10 @@ export function fakeGlobals({
   const PropertiesService = {
     getScriptProperties: () => ({
       getProperty: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
-      setProperty: (k, v) => { store[k] = String(v); },
+      setProperty: (k, v) => {
+        if (failSetProperty && failSetProperty(k)) throw new Error("Exception: Service invoked too many times for one day: properties.");
+        store[k] = String(v);
+      },
       deleteProperty: (k) => { delete store[k]; },
     }),
   };
@@ -403,6 +456,7 @@ export function fakeGlobals({
     globals: { SpreadsheetApp, PropertiesService, LockService, Utilities, Logger, Session, ContentService, CalendarApp, DriveApp, HtmlService },
     logs,
     setActiveUser: (email) => { currentActive = email; },
+    failPropertyWrites: (fn) => { failSetProperty = fn; },
     openCalls,
     props: store,
     isLockHeld: () => lockHeld,

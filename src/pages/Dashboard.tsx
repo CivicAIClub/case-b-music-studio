@@ -8,7 +8,8 @@
 //   2. The lesson schedule (the "Lesson Schedule" tab): lessons still waiting to be put on
 //      Google Calendar ("pending"), lessons that have ended and still need to go on the payroll
 //      time sheet (the "Time sheet" card), and upcoming lessons.
-//   3. Shared Google Drive folders, plus handy links to the Sheet and the sign-up Google Form.
+//   3. Shared Google Drive folders, plus handy links to the Lesson Schedule, the time sheet and
+//      the sign-up Google Form.
 // The code that actually talks to Google lives in src/api/ (appsScriptStudent.ts,
 // appsScriptSchedule.ts, appsScriptCalendar.ts, appsScriptTimesheet.ts). The boxed sections come
 // from src/components/.
@@ -32,10 +33,7 @@ import {
   saveProfileSnapshots,
   type DashboardProfileUpdate,
 } from "../lib/studentProfileSnapshots";
-import {
-  EXTERNAL_LINKS,
-  EXTERNAL_LINK_ORDER,
-} from "../lib/externalLinks";
+import { useExternalLinks } from "../lib/externalLinks";
 import { LessonRow } from "../components/LessonRow";
 import { PendingLessonsSection } from "../components/PendingLessonsSection";
 import { TimesheetSection } from "../components/TimesheetSection";
@@ -97,6 +95,9 @@ export function Dashboard() {
    * function through the modal.
    */
   const [scheduleRefreshToken, setScheduleRefreshToken] = useState(0);
+
+  // The Quick links card's links (the same ones as the header pills).
+  const externalLinks = useExternalLinks();
 
   // From all lessons, keep only the upcoming ones (scheduled for today or later), soonest
   // first, and at most 20 of them. "useMemo" means this list is only worked out again when
@@ -486,7 +487,8 @@ export function Dashboard() {
         {/* Card: a button to create every student's personal Drive folder in one go. */}
         <StudentFoldersSyncCard />
 
-        {/* Card: quick links to the Google Sheet and Google Form, opened in a new tab. */}
+        {/* Card: quick links to the Lesson Schedule, the time sheet and the Google Form, opened */}
+        {/* in a new tab. The two spreadsheet links appear once the script has sent them. */}
         <section
           className="card span-2 quick-links-card"
           aria-labelledby="quick-links-h"
@@ -495,36 +497,32 @@ export function Dashboard() {
             <span aria-hidden="true">🔗</span> Quick links
           </h2>
           <p className="muted profile-updates-intro">
-            Open the source spreadsheet or Google Form in a new tab.
+            Open the Lesson Schedule, your time sheet or the Google Form in a new tab.
           </p>
           <ul className="quick-links">
-            {EXTERNAL_LINK_ORDER.map((key) => {
-              // Look up the label, web address, and description for this link.
-              const link = EXTERNAL_LINKS[key];
-              return (
-                <li key={key}>
-                  <a
-                    className="quick-links__item"
-                    href={link.href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <span className="quick-links__title">
-                      <span className="strong">{link.label}</span>
-                      <span
-                        className="quick-links__icon"
-                        aria-hidden="true"
-                      >
-                        ↗
-                      </span>
+            {externalLinks.map((link) => (
+              <li key={link.key}>
+                <a
+                  className="quick-links__item"
+                  href={link.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <span className="quick-links__title">
+                    <span className="strong">{link.label}</span>
+                    <span
+                      className="quick-links__icon"
+                      aria-hidden="true"
+                    >
+                      ↗
                     </span>
-                    <span className="muted quick-links__desc">
-                      {link.description}
-                    </span>
-                  </a>
-                </li>
-              );
-            })}
+                  </span>
+                  <span className="muted quick-links__desc">
+                    {link.description}
+                  </span>
+                </a>
+              </li>
+            ))}
           </ul>
         </section>
       </div>
