@@ -1,5 +1,9 @@
 # Case B: Music Studio Infrastructure
 
+## What this is
+
+Mr. O'Neal, Pomfret's music teacher, needed one place to run his private lessons: his lesson materials were scattered, scheduling took back-and-forth messages, and there was no single record of each student's progress. This web app gives him a dashboard of his students with inline profiles, lesson scheduling with calendar events, class and per-student Google Drive resources, lesson recaps, and a connection to his payroll time sheet. Status: in use by Mr. O'Neal since May 11, 2026. Since October 7, 2026 he runs a newer version, served by Google with Pomfret sign-in from his own account.
+
 ## Client
 Mr. O'Neal (Music Teacher)
 
@@ -15,12 +19,11 @@ Build a **Music Student Profile** experience (roster, inline profiles, schedules
 - AI auto-tagging for sheet music and materials (e.g., "Intermediate / Jazz / Saxophone") (future)
 - AI voice transcription for post-lesson summaries that auto-update student profiles (future)
 
-## Team
-| Role | Name |
-|------|------|
-| Developer | Serena Xu |
-| Developer | JT Gannon |
-| Club lead | Cayden Auyang |
+## Contributors
+
+- **Cayden Auyang:** developer and club lead; wrote most of the code
+- **Serena Xu:** developer; wrote the early UI (see History below)
+- **JT Gannon:** developer
 
 **Live site:** served by Google with Pomfret sign-in (Mr. O'Neal has the link). The old GitHub Pages address, https://civicaiclub.github.io/case-b-music-studio/, now only shows a "moved" page.
 
